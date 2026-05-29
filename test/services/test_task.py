@@ -1,14 +1,18 @@
+import json
 import unittest
 import os
 import sys
+import uuid
 from pathlib import Path
 from unittest import mock
 
 # add project root to python path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from app.config import config
 from app.services import task as tm
 from app.models.schema import MaterialInfo, VideoParams
+from app.utils import utils
 
 resources_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "resources")
 
@@ -223,6 +227,75 @@ class TestBuildMaterialHints(unittest.TestCase):
                 tm.vision, "describe_materials", side_effect=RuntimeError("api down")
             ):
             self.assertEqual(tm.build_material_hints(params), ["fluffy cat"])
+
+
+class TestStartOrchestration(unittest.TestCase):
+    """End-to-end start() with all heavy externals mocked."""
+
+    def _params(self, **overrides):
+        defaults = dict(
+            video_subject="money",
+            video_source="pexels",
+            video_clip_duration=3,
+            video_count=1,
+            subtitle_enabled=False,
+            voice_name="zh-CN-XiaoxiaoNeural-Female",
+        )
+        defaults.update(overrides)
+        return VideoParams(**defaults)
+
+    def test_full_pipeline_blends_generated_clips(self):
+        task_id = str(uuid.uuid4())
+        params = self._params(video_gen_enabled=True)
+
+        sub_maker = mock.Mock()
+        with mock.patch.object(tm, "sm") as sm, \
+            mock.patch.object(tm.vision, "is_enabled", return_value=False), \
+            mock.patch.object(tm, "augment_with_pinterest"), \
+            mock.patch.object(tm.llm, "generate_script", return_value="a script"), \
+            mock.patch.object(tm.llm, "generate_terms", return_value=["money"]), \
+            mock.patch.object(tm.videogen, "generate_clips", return_value=["gen1.mp4"]), \
+            mock.patch.object(tm.material, "download_videos", return_value=["s1.mp4"]), \
+            mock.patch.object(tm.voice, "tts", return_value=sub_maker), \
+            mock.patch.object(tm.voice, "get_audio_duration", return_value=5), \
+            mock.patch.object(tm.video, "combine_videos") as combine, \
+            mock.patch.object(tm.video, "generate_video"), \
+            mock.patch.object(tm.upload_post.upload_post_service, "is_configured", return_value=False):
+            result = tm.start(task_id, params)
+
+            self.assertIsNotNone(result)
+            # AI clip leads, stock follows -> both reach the combiner
+            self.assertEqual(result["materials"], ["gen1.mp4", "s1.mp4"])
+            self.assertEqual(len(result["videos"]), 1)
+            # combiner saw the blended material list
+            self.assertEqual(combine.call_args.kwargs["video_paths"], ["gen1.mp4", "s1.mp4"])
+
+    def test_resume_reuses_cached_script_and_terms(self):
+        task_id = str(uuid.uuid4())
+        task_dir = utils.task_dir(task_id)
+        os.makedirs(task_dir, exist_ok=True)
+        with open(os.path.join(task_dir, "script.json"), "w", encoding="utf-8") as f:
+            json.dump({"script": "cached script", "search_terms": ["t1"]}, f)
+
+        original_resume = config.app.get("resume")
+        config.app["resume"] = True
+        try:
+            with mock.patch.object(tm, "sm"), \
+                mock.patch.object(tm, "augment_with_pinterest"), \
+                mock.patch.object(tm.llm, "generate_script") as gs, \
+                mock.patch.object(tm.llm, "generate_terms") as gt, \
+                mock.patch.object(tm, "build_material_hints") as bmh:
+                result = tm.start(task_id, self._params(), stop_at="terms")
+        finally:
+            if original_resume is None:
+                config.app.pop("resume", None)
+            else:
+                config.app["resume"] = original_resume
+
+        self.assertEqual(result, {"script": "cached script", "terms": ["t1"]})
+        gs.assert_not_called()
+        gt.assert_not_called()
+        bmh.assert_not_called()  # vision step skipped on resume
 
 
 if __name__ == "__main__":

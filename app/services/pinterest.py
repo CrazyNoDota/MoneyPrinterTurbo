@@ -23,6 +23,7 @@ from loguru import logger
 from app.config import config
 from app.models.schema import MaterialInfo
 from app.utils import utils
+from app.utils.retry import call_with_retry
 
 _SEARCH_URL = "https://www.pinterest.com/resource/BaseSearchResource/get/"
 
@@ -115,11 +116,13 @@ def search_images(query: str, limit: int = 6) -> List[str]:
     logger.info(f"searching pinterest images for '{query}'")
     try:
         # 1. Prime the session: the search page sets csrftoken / session cookies.
-        session.get(
+        call_with_retry(
+            session.get,
             referer,
             proxies=config.proxy,
             verify=_get_tls_verify(),
             timeout=(30, 60),
+            description="pinterest.prime",
         )
 
         # Ask for extra so the resolution filter downstream still leaves enough.
@@ -143,14 +146,18 @@ def search_images(query: str, limit: int = 6) -> List[str]:
                 "X-CSRFToken": session.cookies.get("csrftoken", ""),
             },
         )
-        r = session.get(
-            url,
-            headers=headers,
-            proxies=config.proxy,
-            verify=_get_tls_verify(),
-            timeout=(30, 60),
-        )
-        r.raise_for_status()
+        def _fetch():
+            resp = session.get(
+                url,
+                headers=headers,
+                proxies=config.proxy,
+                verify=_get_tls_verify(),
+                timeout=(30, 60),
+            )
+            resp.raise_for_status()
+            return resp
+
+        r = call_with_retry(_fetch, description="pinterest.search")
         urls = parse_results(r.json())
     except Exception as e:
         logger.warning(f"pinterest search failed for '{query}': {e}")
@@ -158,7 +165,13 @@ def search_images(query: str, limit: int = 6) -> List[str]:
     finally:
         session.close()
 
-    logger.info(f"pinterest returned {len(urls)} image(s) for '{query}'")
+    if not urls:
+        logger.warning(
+            f"pinterest returned 0 images for '{query}' -- the unofficial endpoint "
+            "may have changed or be rate-limiting; falling back to stock/local media"
+        )
+    else:
+        logger.info(f"pinterest returned {len(urls)} image(s) for '{query}'")
     return urls[: int(limit)]
 
 
@@ -174,14 +187,18 @@ def _save_image(image_url: str, query: str) -> str:
     if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
         return image_path
 
-    resp = requests.get(
-        image_url,
-        headers=_HEADERS,
-        proxies=config.proxy,
-        verify=_get_tls_verify(),
-        timeout=(60, 120),
-    )
-    resp.raise_for_status()
+    def _download():
+        r = requests.get(
+            image_url,
+            headers=_HEADERS,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+            timeout=(60, 120),
+        )
+        r.raise_for_status()
+        return r
+
+    resp = call_with_retry(_download, description="pinterest.image")
     with open(image_path, "wb") as f:
         f.write(resp.content)
 
@@ -218,4 +235,24 @@ def download_images(query: str, limit: int = 6) -> List[MaterialInfo]:
     return materials
 
 
-__all__ = ["is_enabled", "search_images", "download_images", "parse_results"]
+def health_check(query: str = "nature") -> bool:
+    """Probe the unofficial endpoint; True if it returns at least one image.
+
+    Useful as an autonomous-system pre-flight: Pinterest can silently change or
+    block the scraping endpoint, and this surfaces that without running a full
+    generation.
+    """
+    try:
+        return len(search_images(query, limit=1)) > 0
+    except Exception as e:  # noqa: BLE001 - probe is best-effort
+        logger.warning(f"pinterest health check failed: {e}")
+        return False
+
+
+__all__ = [
+    "is_enabled",
+    "search_images",
+    "download_images",
+    "parse_results",
+    "health_check",
+]

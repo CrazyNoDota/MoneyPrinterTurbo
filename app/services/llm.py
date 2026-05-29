@@ -1,6 +1,8 @@
 import json
 import logging
+import random
 import re
+import time
 import requests
 from typing import List
 
@@ -12,6 +14,19 @@ from app.config import config
 
 _max_retries = 5
 _DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
+
+def _backoff_sleep(attempt: int, base: float = 1.0, cap: float = 30.0) -> None:
+    """Exponential backoff with jitter between LLM retries.
+
+    The retry loops below previously re-called the provider immediately, which
+    hammers a rate-limited API. Sleeping between attempts lets a transient 429 /
+    5xx recover instead of burning every attempt in a few milliseconds.
+    """
+    delay = min(base * (2 ** attempt), cap)
+    delay += random.random() * delay
+    logger.info(f"backing off {delay:.1f}s before retry")
+    time.sleep(delay)
 _DEPRECATED_GEMINI_MODELS = {"gemini-pro", "gemini-1.0-pro"}
 
 
@@ -543,8 +558,9 @@ Generate a script for a video, depending on the subject of the video.
         except Exception as e:
             logger.error(f"failed to generate script: {e}")
 
-        if i < _max_retries:
+        if i < _max_retries - 1:
             logger.warning(f"failed to generate video script, trying again... {i + 1}")
+            _backoff_sleep(i)
     if "Error: " in final_script:
         logger.error(f"failed to generate video script: {final_script}")
     else:
@@ -624,8 +640,9 @@ Please note that you must use English for generating video search terms; Chinese
 
         if search_terms and len(search_terms) > 0:
             break
-        if i < _max_retries:
+        if i < _max_retries - 1:
             logger.warning(f"failed to generate video terms, trying again... {i + 1}")
+            _backoff_sleep(i)
 
     logger.success(f"completed: \n{search_terms}")
     return search_terms

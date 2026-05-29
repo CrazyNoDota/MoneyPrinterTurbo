@@ -33,6 +33,7 @@ class TestMaterialTlsVerification(unittest.TestCase):
         config.proxy.clear()
 
         fake_response = SimpleNamespace(
+            raise_for_status=lambda: None,
             json=lambda: {
                 "videos": [
                     {
@@ -46,7 +47,7 @@ class TestMaterialTlsVerification(unittest.TestCase):
                         ],
                     }
                 ]
-            }
+            },
         )
 
         with patch("app.services.material.requests.get", return_value=fake_response) as get:
@@ -65,6 +66,7 @@ class TestMaterialTlsVerification(unittest.TestCase):
         config.proxy.clear()
 
         fake_response = SimpleNamespace(
+            raise_for_status=lambda: None,
             json=lambda: {
                 "hits": [
                     {
@@ -77,7 +79,7 @@ class TestMaterialTlsVerification(unittest.TestCase):
                         },
                     }
                 ]
-            }
+            },
         )
 
         with patch("app.services.material.requests.get", return_value=fake_response) as get:
@@ -90,7 +92,9 @@ class TestMaterialTlsVerification(unittest.TestCase):
         config.app.pop("tls_verify", None)
         config.proxy.clear()
 
-        fake_response = SimpleNamespace(content=b"fake-video")
+        fake_response = SimpleNamespace(
+            content=b"fake-video", raise_for_status=lambda: None
+        )
 
         class FakeVideoFileClip:
             duration = 1

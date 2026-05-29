@@ -11,7 +11,10 @@ in the message content, with a ~180KB-per-image size limit.
 """
 
 import base64
+import hashlib
 import io
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import requests
@@ -20,7 +23,8 @@ from PIL import Image
 
 from app.config import config
 from app.models import const
-from app.utils import utils
+from app.utils import cache, utils
+from app.utils.retry import call_with_retry
 
 # NVIDIA NIM rejects inline images whose base64 payload exceeds ~180KB; stay
 # safely under that so a single frame never trips the limit.
@@ -109,14 +113,18 @@ def _caption_frame(image_b64: str) -> str:
         "temperature": 0.2,
         "stream": False,
     }
-    resp = requests.post(
-        url,
-        headers=headers,
-        json=payload,
-        proxies=config.proxy,
-        timeout=(30, 120),
-    )
-    resp.raise_for_status()
+    def _post():
+        r = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            proxies=config.proxy,
+            timeout=(30, 120),
+        )
+        r.raise_for_status()
+        return r
+
+    resp = call_with_retry(_post, description="vision.caption")
     data = resp.json()
     choices = data.get("choices") or []
     if not choices:
@@ -125,8 +133,48 @@ def _caption_frame(image_b64: str) -> str:
     return text.strip()
 
 
+def _file_fingerprint(path: str) -> str:
+    """MD5 of a file's bytes -- identifies identical content across runs."""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _cache_enabled() -> bool:
+    return bool(config.app.get("vision_cache", True))
+
+
+def _cache_key(path: str) -> str:
+    """Cache key tied to the file content + the settings that affect captions."""
+    return cache.make_key(
+        _file_fingerprint(path),
+        config.app.get("vision_model_name", "meta/llama-3.2-11b-vision-instruct"),
+        config.app.get("vision_seconds_per_frame", 5),
+        config.app.get("vision_max_frames", 4),
+    )
+
+
 def describe_media(path: str) -> str:
-    """Return a concise description of an image or video file."""
+    """Return a concise description of an image or video file.
+
+    Results are cached on disk by file content (+ model/frame settings) so the
+    same asset is never re-analyzed -- repeat runs are instant and free. Disable
+    with ``config.app.vision_cache = false``.
+    """
+    cache_key = None
+    if _cache_enabled():
+        try:
+            cache_key = _cache_key(path)
+            hit = cache.get("vision", cache_key)
+            if hit is not None:
+                logger.info(f"vision cache hit: {os.path.basename(path)}")
+                return hit
+        except Exception as exc:  # noqa: BLE001 - caching is best-effort
+            logger.warning(f"vision cache lookup failed for {path}: {exc}")
+            cache_key = None
+
     ext = utils.parse_extension(path)
     if ext in const.FILE_TYPE_IMAGES:
         frames = [Image.open(path)]
@@ -151,32 +199,50 @@ def describe_media(path: str) -> str:
             seen.add(key)
             captions.append(caption)
 
-    return " ".join(captions).strip()
+    result = " ".join(captions).strip()
+    if cache_key and result:
+        cache.set("vision", cache_key, result)
+    return result
 
 
 def describe_materials(materials) -> List[str]:
     """Describe each material; returns one description string per analyzed file.
 
-    Failures are skipped (non-fatal) so missing vision never breaks generation.
+    Materials are analyzed concurrently (bounded by ``vision_concurrency``,
+    default 4) since each call is an independent network round-trip; output order
+    matches input order. Failures are skipped (non-fatal) so missing vision never
+    breaks generation.
     """
-    import os
-
-    descriptions: List[str] = []
     if not _api_key():
         logger.warning("vision is enabled but no API key is set; skipping analysis")
-        return descriptions
+        return []
 
+    paths = []
     for material in materials or []:
         path = getattr(material, "url", "") or ""
-        if not path or not os.path.isfile(path):
-            continue
+        if path and os.path.isfile(path):
+            paths.append(path)
+
+    if not paths:
+        return []
+
+    def _describe(path: str) -> str:
         logger.info(f"analyzing material with vision model: {path}")
         try:
             description = describe_media(path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-file failure is non-fatal
             logger.warning(f"failed to analyze material {path}: {exc}")
-            continue
+            return ""
         if description:
-            descriptions.append(description)
             logger.success(f"vision: {os.path.basename(path)} -> {description}")
-    return descriptions
+        return description
+
+    workers = max(1, int(config.app.get("vision_concurrency", 4) or 4))
+    workers = min(workers, len(paths))
+    if workers == 1:
+        results = [_describe(p) for p in paths]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_describe, paths))  # preserves order
+
+    return [d for d in results if d]

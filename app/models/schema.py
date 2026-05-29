@@ -97,6 +97,13 @@ class VideoParams(BaseModel):
     # alongside stock footage. Works on top of any video_source.
     pinterest_enabled: Optional[bool] = False
     pinterest_count: Optional[int] = 6
+    # Generate AI video clips (image-to-video from the scraped/stock photos, or
+    # text-to-video from the search terms) via a pluggable backend, and blend
+    # them in alongside stock footage. Off by default; the provider + budget caps
+    # live in config.toml ([app].video_gen_*). See app/services/videogen.
+    video_gen_enabled: Optional[bool] = False
+    video_gen_provider: Optional[str] = None  # null | replicate | fal | http
+    video_gen_count: Optional[int] = 2
 
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
     video_language: Optional[str] = ""  # auto detect

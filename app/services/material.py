@@ -12,6 +12,7 @@ from app.config import config
 from app.models import const
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.utils import utils
+from app.utils.retry import call_with_retry
 
 # Extensions accepted when scanning a local asset folder. Superset of the
 # WebUI uploader (adds avi/flv) reusing the canonical lists in const.
@@ -113,13 +114,18 @@ def search_videos_pexels(
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
 
     try:
-        r = requests.get(
-            query_url,
-            headers=headers,
-            proxies=config.proxy,
-            verify=_get_tls_verify(),
-            timeout=(30, 60),
-        )
+        def _search():
+            resp = requests.get(
+                query_url,
+                headers=headers,
+                proxies=config.proxy,
+                verify=_get_tls_verify(),
+                timeout=(30, 60),
+            )
+            resp.raise_for_status()
+            return resp
+
+        r = call_with_retry(_search, description="pexels.search")
         response = r.json()
         video_items = []
         if "videos" not in response:
@@ -172,9 +178,17 @@ def search_videos_pixabay(
     logger.info(f"searching videos: {query_url}, with proxies: {config.proxy}")
 
     try:
-        r = requests.get(
-            query_url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
-        )
+        def _search():
+            resp = requests.get(
+                query_url,
+                proxies=config.proxy,
+                verify=_get_tls_verify(),
+                timeout=(30, 60),
+            )
+            resp.raise_for_status()
+            return resp
+
+        r = call_with_retry(_search, description="pixabay.search")
         response = r.json()
         video_items = []
         if "hits" not in response:
@@ -229,16 +243,19 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     }
 
     # if video does not exist, download it
-    with open(video_path, "wb") as f:
-        f.write(
-            requests.get(
-                video_url,
-                headers=headers,
-                proxies=config.proxy,
-                verify=_get_tls_verify(),
-                timeout=(60, 240),
-            ).content
+    def _download():
+        resp = requests.get(
+            video_url,
+            headers=headers,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+            timeout=(60, 240),
         )
+        resp.raise_for_status()
+        return resp
+
+    with open(video_path, "wb") as f:
+        f.write(call_with_retry(_download, description="material.download").content)
 
     if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
         clip = None

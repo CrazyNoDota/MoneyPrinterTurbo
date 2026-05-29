@@ -20,6 +20,10 @@ class TestVision(unittest.TestCase):
     def setUp(self):
         self.original_app = dict(config.app)
         self.test_img = os.path.join(resources_dir, "1.png")
+        # The on-disk vision cache persists across tests; disable it by default
+        # so cases don't contaminate each other. The cache test re-enables it
+        # with an in-memory stub.
+        config.app["vision_cache"] = False
 
     def tearDown(self):
         config.app.clear()
@@ -73,6 +77,36 @@ class TestVision(unittest.TestCase):
             result = vision.describe_materials(materials)
         self.assertEqual(result, [])
         dm.assert_not_called()
+
+    def test_describe_media_caches_result(self):
+        # cache hit on the second call avoids a second vision API round-trip
+        config.app["vision_cache"] = True
+        store = {}
+        with mock.patch.object(
+            vision.cache, "get", side_effect=lambda ns, k: store.get(k)
+        ), mock.patch.object(
+            vision.cache, "set", side_effect=lambda ns, k, v: store.__setitem__(k, v)
+        ), mock.patch.object(
+            vision, "_caption_frame", return_value="a cat"
+        ) as cap:
+            first = vision.describe_media(self.test_img)
+            second = vision.describe_media(self.test_img)
+        self.assertEqual(first, "a cat")
+        self.assertEqual(second, "a cat")
+        cap.assert_called_once()  # second call served from cache
+
+    def test_describe_materials_runs_in_parallel_preserving_order(self):
+        config.app["vision_api_key"] = "test-key"
+        config.app["vision_concurrency"] = 4
+        materials = [
+            MaterialInfo(provider="local", url=os.path.join(resources_dir, f"{i}.png"))
+            for i in range(1, 4)
+        ]
+        with mock.patch.object(
+            vision, "describe_media", side_effect=lambda p: f"desc-{os.path.basename(p)}"
+        ):
+            result = vision.describe_materials(materials)
+        self.assertEqual(result, ["desc-1.png", "desc-2.png", "desc-3.png"])
 
 
 if __name__ == "__main__":
