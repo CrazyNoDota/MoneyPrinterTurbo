@@ -180,5 +180,50 @@ class TestMaterialKeywords(unittest.TestCase):
         self.assertEqual(gen.call_args.kwargs["material_names"], ["fluffy cat"])
 
 
+class TestBuildMaterialHints(unittest.TestCase):
+    """Vision descriptions when enabled, else file-name keywords."""
+
+    def _params(self):
+        return VideoParams(
+            video_subject="cats",
+            video_materials=[
+                MaterialInfo(provider="local", url="/a.mp4", name="fluffy_cat.mp4"),
+            ],
+        )
+
+    def test_no_materials_returns_empty(self):
+        params = VideoParams(video_subject="x", video_materials=None)
+        self.assertEqual(tm.build_material_hints(params), [])
+
+    def test_vision_disabled_uses_file_names(self):
+        params = self._params()
+        with mock.patch.object(tm.vision, "is_enabled", return_value=False):
+            self.assertEqual(tm.build_material_hints(params), ["fluffy cat"])
+
+    def test_vision_enabled_uses_descriptions(self):
+        params = self._params()
+        with mock.patch.object(tm.vision, "is_enabled", return_value=True), \
+            mock.patch.object(
+                tm.vision, "describe_materials", return_value=["a cat napping on a couch"]
+            ):
+            self.assertEqual(
+                tm.build_material_hints(params), ["a cat napping on a couch"]
+            )
+
+    def test_vision_empty_result_falls_back_to_file_names(self):
+        params = self._params()
+        with mock.patch.object(tm.vision, "is_enabled", return_value=True), \
+            mock.patch.object(tm.vision, "describe_materials", return_value=[]):
+            self.assertEqual(tm.build_material_hints(params), ["fluffy cat"])
+
+    def test_vision_exception_falls_back_to_file_names(self):
+        params = self._params()
+        with mock.patch.object(tm.vision, "is_enabled", return_value=True), \
+            mock.patch.object(
+                tm.vision, "describe_materials", side_effect=RuntimeError("api down")
+            ):
+            self.assertEqual(tm.build_material_hints(params), ["fluffy cat"])
+
+
 if __name__ == "__main__":
     unittest.main()

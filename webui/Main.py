@@ -653,6 +653,18 @@ with middle_panel:
             if local_materials_dir and not os.path.isdir(local_materials_dir):
                 st.warning(tr("Folder not found"))
 
+            # 用视觉模型分析素材内容，让脚本和搜索词基于画面里真正发生的事情。
+            vision_enabled = st.checkbox(
+                tr("Understand content with AI vision"),
+                value=config.app.get("vision_enabled", False),
+                help=tr("Analyzes your photos/sampled video frames with a vision model"),
+            )
+            config.app["vision_enabled"] = vision_enabled
+            if vision_enabled and not (
+                config.app.get("vision_api_key") or config.app.get("nvidia_api_key")
+            ):
+                st.warning(tr("Vision API key not set"))
+
             # 上传素材不足以覆盖音频时长时，可自动用 Pexels/Pixabay 素材补足。
             # 即使关闭该选项，未上传任何素材时也会自动回退到在线素材。
             params.fill_with_stock = st.checkbox(

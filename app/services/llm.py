@@ -552,7 +552,12 @@ Generate a script for a video, depending on the subject of the video.
     return final_script.strip()
 
 
-def generate_terms(video_subject: str, video_script: str, amount: int = 5) -> List[str]:
+def generate_terms(
+    video_subject: str,
+    video_script: str,
+    amount: int = 5,
+    material_descriptions: List[str] = None,
+) -> List[str]:
     prompt = f"""
 # Role: Video Search Terms Generator
 
@@ -578,6 +583,14 @@ Generate {amount} search terms for stock videos, depending on the subject of a v
 
 Please note that you must use English for generating video search terms; Chinese is not accepted.
 """.strip()
+    if material_descriptions:
+        scenes = "\n".join(f"  - {desc}" for desc in material_descriptions)
+        prompt += (
+            "\n\n### Visible Content (from the user's own footage)\n"
+            "The user-provided clips actually show the scenes below. Bias the search "
+            "terms toward this real content so any supplemental stock footage matches:\n"
+            f"{scenes}"
+        )
 
     logger.info(f"subject: {video_subject}")
 

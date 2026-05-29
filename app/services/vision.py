@@ -1,0 +1,182 @@
+"""Visual understanding of local materials.
+
+Samples frames from videos (and uses images directly), sends them to a vision
+model, and returns concise descriptions of what is actually shown. These
+descriptions are used to write the narration script and to build stock-footage
+search terms that match the real content.
+
+Currently targets NVIDIA NIM vision models (OpenAI-compatible chat endpoint),
+which accept inline images embedded as ``<img src="data:image/jpeg;base64,..."/>``
+in the message content, with a ~180KB-per-image size limit.
+"""
+
+import base64
+import io
+from typing import List
+
+import requests
+from loguru import logger
+from PIL import Image
+
+from app.config import config
+from app.models import const
+from app.utils import utils
+
+# NVIDIA NIM rejects inline images whose base64 payload exceeds ~180KB; stay
+# safely under that so a single frame never trips the limit.
+_MAX_IMAGE_B64_BYTES = 170_000
+
+_CAPTION_PROMPT = (
+    "Describe what is visible in this image in one short, concrete sentence: "
+    "the main subject, the setting, and any action. Be literal and specific. "
+    "Output only the description, no preamble."
+)
+
+
+def is_enabled() -> bool:
+    return bool(config.app.get("vision_enabled", False))
+
+
+def _api_key() -> str:
+    # Dedicated key first, otherwise reuse the NVIDIA key (same endpoint).
+    return config.app.get("vision_api_key") or config.app.get("nvidia_api_key") or ""
+
+
+def _image_to_jpeg_b64(image: Image.Image, max_dim: int = 512) -> str:
+    """Downscale + JPEG-encode a PIL image to a base64 string under the size cap."""
+    image = image.convert("RGB")
+    # progressively shrink/recompress until the encoded payload fits
+    for dim, quality in ((max_dim, 70), (max_dim, 55), (384, 50), (320, 40)):
+        work = image.copy()
+        work.thumbnail((dim, dim))
+        buffer = io.BytesIO()
+        work.save(buffer, format="JPEG", quality=quality)
+        encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        if len(encoded) <= _MAX_IMAGE_B64_BYTES:
+            return encoded
+    return encoded  # best effort; may still be rejected by the API
+
+
+def _sample_video_frames(video_path: str) -> List[Image.Image]:
+    """Grab one frame every ``vision_seconds_per_frame`` seconds, capped."""
+    from moviepy.video.io.VideoFileClip import VideoFileClip
+
+    seconds_per_frame = float(config.app.get("vision_seconds_per_frame", 5) or 5)
+    max_frames = int(config.app.get("vision_max_frames", 4) or 4)
+
+    frames: List[Image.Image] = []
+    clip = None
+    try:
+        clip = VideoFileClip(video_path)
+        duration = clip.duration or 0
+        if duration <= seconds_per_frame:
+            timestamps = [max(duration * 0.5, 0)]
+        else:
+            timestamps = []
+            t = 0.0
+            while t < duration and len(timestamps) < max_frames:
+                timestamps.append(t)
+                t += seconds_per_frame
+        for ts in timestamps:
+            try:
+                frame = clip.get_frame(min(ts, max(duration - 0.1, 0)))
+                frames.append(Image.fromarray(frame))
+            except Exception as exc:
+                logger.warning(f"failed to read frame at {ts:.1f}s from {video_path}: {exc}")
+    finally:
+        if clip is not None:
+            try:
+                clip.close()
+            except Exception:
+                pass
+    return frames
+
+
+def _caption_frame(image_b64: str) -> str:
+    """Send a single frame to the vision model and return its description."""
+    base_url = config.app.get("vision_base_url", "https://integrate.api.nvidia.com/v1")
+    model = config.app.get("vision_model_name", "meta/llama-3.2-11b-vision-instruct")
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {_api_key()}",
+        "Accept": "application/json",
+    }
+    content = f'{_CAPTION_PROMPT} <img src="data:image/jpeg;base64,{image_b64}" />'
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 256,
+        "temperature": 0.2,
+        "stream": False,
+    }
+    resp = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        proxies=config.proxy,
+        timeout=(30, 120),
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError(f"vision model returned no choices: {data}")
+    text = (choices[0].get("message") or {}).get("content") or ""
+    return text.strip()
+
+
+def describe_media(path: str) -> str:
+    """Return a concise description of an image or video file."""
+    ext = utils.parse_extension(path)
+    if ext in const.FILE_TYPE_IMAGES:
+        frames = [Image.open(path)]
+    else:
+        frames = _sample_video_frames(path)
+
+    captions = []
+    seen = set()
+    for frame in frames:
+        try:
+            caption = _caption_frame(_image_to_jpeg_b64(frame))
+        except Exception as exc:
+            logger.warning(f"vision caption failed for {path}: {exc}")
+            continue
+        finally:
+            try:
+                frame.close()
+            except Exception:
+                pass
+        key = caption.lower().strip(" .")
+        if caption and key not in seen:
+            seen.add(key)
+            captions.append(caption)
+
+    return " ".join(captions).strip()
+
+
+def describe_materials(materials) -> List[str]:
+    """Describe each material; returns one description string per analyzed file.
+
+    Failures are skipped (non-fatal) so missing vision never breaks generation.
+    """
+    import os
+
+    descriptions: List[str] = []
+    if not _api_key():
+        logger.warning("vision is enabled but no API key is set; skipping analysis")
+        return descriptions
+
+    for material in materials or []:
+        path = getattr(material, "url", "") or ""
+        if not path or not os.path.isfile(path):
+            continue
+        logger.info(f"analyzing material with vision model: {path}")
+        try:
+            description = describe_media(path)
+        except Exception as exc:
+            logger.warning(f"failed to analyze material {path}: {exc}")
+            continue
+        if description:
+            descriptions.append(description)
+            logger.success(f"vision: {os.path.basename(path)} -> {description}")
+    return descriptions

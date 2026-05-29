@@ -99,6 +99,7 @@ def apply_env_overrides():
         "modelscope_api_key",
         "ernie_api_key",
         "ernie_secret_key",
+        "vision_api_key",
     ]
     for key in scalar_app_keys:
         env_val = os.getenv(key.upper())

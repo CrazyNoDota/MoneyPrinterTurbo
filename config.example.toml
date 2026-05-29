@@ -119,6 +119,20 @@ nvidia_api_key = ""
 nvidia_base_url = "https://integrate.api.nvidia.com/v1"
 nvidia_model_name = "stepfun-ai/step-3.7-flash"
 
+########## Vision (understand local photos/videos)
+# When enabled, local materials (images + sampled video frames) are analyzed by
+# a vision model so the generated script and stock search terms reflect the real
+# content. Costs a few cheap vision calls per video.
+# IMPORTANT: vision_model_name MUST be a multimodal/VLM model. A text-only model
+# (e.g. mistral-large / most *-instruct text models) cannot see images.
+vision_enabled = false
+vision_provider = "nvidia"
+vision_model_name = "meta/llama-3.2-11b-vision-instruct"
+vision_base_url = "https://integrate.api.nvidia.com/v1"
+vision_api_key = ""  # falls back to nvidia_api_key when empty; set VISION_API_KEY in .env
+vision_seconds_per_frame = 5
+vision_max_frames = 4
+
 ########## Qwen API Key
 # Visit https://dashscope.console.aliyun.com/apiKey to get your API key
 # Visit below links to get more details

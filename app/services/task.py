@@ -8,7 +8,7 @@ from loguru import logger
 from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
-from app.services import llm, material, subtitle, video, voice, upload_post
+from app.services import llm, material, subtitle, video, vision, voice, upload_post
 from app.services import state as sm
 from app.utils import utils
 
@@ -49,20 +49,43 @@ def get_material_keywords(materials):
     return unique
 
 
-def generate_script(task_id, params):
+def build_material_hints(params):
+    """Content hints describing the local materials.
+
+    Uses the vision model (actual scene descriptions) when enabled, otherwise
+    falls back to readable keywords derived from the file names.
+    """
+    if not params.video_materials:
+        return []
+
+    if vision.is_enabled():
+        try:
+            descriptions = vision.describe_materials(params.video_materials)
+            if descriptions:
+                logger.info(
+                    f"using {len(descriptions)} vision description(s) as content hints"
+                )
+                return descriptions
+            logger.warning("vision returned no descriptions; falling back to file names")
+        except Exception as e:
+            logger.warning(f"vision analysis failed, falling back to file names: {e}")
+
+    return get_material_keywords(params.video_materials)
+
+
+def generate_script(task_id, params, material_hints=None):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
     if not video_script:
-        material_names = get_material_keywords(params.video_materials)
-        if material_names:
-            logger.info(
-                f"using {len(material_names)} uploaded file name(s) as content hints"
-            )
+        if material_hints is None:
+            material_hints = get_material_keywords(params.video_materials)
+        if material_hints:
+            logger.info(f"using {len(material_hints)} material content hint(s)")
         video_script = llm.generate_script(
             video_subject=params.video_subject,
             language=params.video_language,
             paragraph_number=params.paragraph_number,
-            material_names=material_names,
+            material_names=material_hints,
         )
     else:
         logger.debug(f"video script: \n{video_script}")
@@ -75,12 +98,15 @@ def generate_script(task_id, params):
     return video_script
 
 
-def generate_terms(task_id, params, video_script):
+def generate_terms(task_id, params, video_script, material_hints=None):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
     if not video_terms:
         video_terms = llm.generate_terms(
-            video_subject=params.video_subject, video_script=video_script, amount=5
+            video_subject=params.video_subject,
+            video_script=video_script,
+            amount=5,
+            material_descriptions=material_hints,
         )
     else:
         if isinstance(video_terms, str):
@@ -374,8 +400,12 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
             params.local_materials_dir
         )
 
+    # Understand the local materials once (vision descriptions or file names) and
+    # reuse the hints for both the script and the stock search terms.
+    material_hints = build_material_hints(params)
+
     # 1. Generate script
-    video_script = generate_script(task_id, params)
+    video_script = generate_script(task_id, params, material_hints=material_hints)
     if not video_script or "Error: " in video_script:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -396,14 +426,18 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         params.fill_with_stock or not params.video_materials
     )
     if params.video_source != "local":
-        video_terms = generate_terms(task_id, params, video_script)
+        video_terms = generate_terms(
+            task_id, params, video_script, material_hints=material_hints
+        )
         if not video_terms:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return
     elif local_may_use_stock:
         # In local mode a terms failure is non-fatal: we can still fall back to
         # the uploaded materials only.
-        video_terms = generate_terms(task_id, params, video_script)
+        video_terms = generate_terms(
+            task_id, params, video_script, material_hints=material_hints
+        )
         if not video_terms:
             logger.warning(
                 "failed to generate video terms; stock footage fill will be skipped"
