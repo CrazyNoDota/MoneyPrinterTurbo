@@ -28,6 +28,27 @@ def project_dir() -> str:
     return d
 
 
+def assets_dir() -> str:
+    """Project ``assets/`` dir (where background photos are staged for HTML)."""
+    return os.path.join(project_dir(), "assets")
+
+
+def reset_assets() -> str:
+    """Empty + recreate the assets dir so each composition starts clean."""
+    d = assets_dir()
+    if os.path.isdir(d):
+        for name in os.listdir(d):
+            p = os.path.join(d, name)
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+            except Exception as e:  # noqa: BLE001 - cleanup is best-effort
+                logger.debug(f"failed to clear stale asset {p}: {e}")
+    else:
+        os.makedirs(d, exist_ok=True)
+    return d
+
+
 def is_available() -> bool:
     """True when the project exists and Node is reachable."""
     if not os.path.exists(os.path.join(project_dir(), "index.html")):

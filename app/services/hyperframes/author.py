@@ -34,15 +34,23 @@ HYPERFRAMES COMPOSITION CONTRACT (follow exactly):
     const tl = gsap.timeline({ paused: true });
     /* tl.from(...) / tl.to(...) tweens */
     window.__timelines["main"] = tl;
-- DETERMINISTIC ONLY: no Date.now(), no Math.random(), no fetch()/XHR, no external
-  assets except the GSAP CDN above. Self-contained inline CSS only.
+- DETERMINISTIC ONLY: no Date.now(), no Math.random(), no fetch()/XHR. Self-contained
+  inline CSS only. The ONLY external references allowed are the GSAP CDN above and the
+  local files listed under AVAILABLE ASSETS (referenced as src="assets/<file>").
 - body must be exactly {width}px by {height}px, overflow hidden, dark background.
 - Make text large and legible for vertical video; keep within safe margins
   (use max-width / responsive font-size so long lines never overflow the frame).
+- BACKGROUNDS: when AVAILABLE ASSETS are listed, use a relevant photo as a full-bleed
+  background behind the text for that scene -- an <img class="clip" src="assets/<file>">
+  on a LOWER data-track-index than the text, covering the frame (object-fit: cover,
+  width/height 100%), with a dark gradient/overlay so the text stays legible. Match each
+  background's data-start/data-duration to the scene it belongs to. Only reference files
+  that appear under AVAILABLE ASSETS -- never invent file names.
 
 STYLE: modern motion-graphics for a short-form "{subject}" video -- kinetic
-typography, bold headings, optional animated numbers/lists. One scene visible at a
-time (sequential data-start/data-duration), animated in and out with GSAP.
+typography, bold headings, optional animated numbers/lists, real photo backgrounds
+where provided. One scene visible at a time (sequential data-start/data-duration),
+animated in and out with GSAP.
 """
 
 
@@ -53,7 +61,26 @@ def _scene_table(scenes: List[Scene]) -> str:
     return "\n".join(lines)
 
 
-def _build_prompt(scenes: List[Scene], subject: str, width: int, height: int, total: float, feedback: str = "") -> str:
+def _assets_block(backgrounds) -> str:
+    if not backgrounds:
+        return ""
+    lines = ["AVAILABLE ASSETS (use as full-bleed scene backgrounds via src=\"assets/<file>\"):"]
+    for b in backgrounds:
+        lines.append(f"  assets/{_asset_name(b)} -- {_asset_desc(b)}")
+    return "\n".join(lines)
+
+
+def _asset_name(b) -> str:
+    # Accept either a Background dataclass (filename "assets/x.jpg") or a bare name.
+    name = getattr(b, "filename", b)
+    return str(name).split("/")[-1]
+
+
+def _asset_desc(b) -> str:
+    return str(getattr(b, "description", "") or "")
+
+
+def _build_prompt(scenes: List[Scene], subject: str, width: int, height: int, total: float, feedback: str = "", backgrounds=None) -> str:
     # .replace (not .format) because the contract contains literal JS braces.
     contract = (
         _CONTRACT.replace("{total}", str(round(total, 3)))
@@ -65,12 +92,13 @@ def _build_prompt(scenes: List[Scene], subject: str, width: int, height: int, to
         "You are a motion-graphics author. Produce a hyperframes HTML composition.",
         contract,
         _scene_table(scenes),
+        _assets_block(backgrounds),
         f"\nThe root data-duration must equal {round(total, 3)} seconds.",
     ]
     if feedback:
         parts.append(f"\nYour previous attempt was rejected: {feedback}\nReturn a corrected full HTML document.")
     parts.append("\nReturn ONLY the HTML document now.")
-    return "\n\n".join(parts)
+    return "\n\n".join(p for p in parts if p)
 
 
 _FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
@@ -92,9 +120,10 @@ def _strip_fences(text: str) -> str:
 
 
 _FORBIDDEN = ("math.random", "date.now(", "fetch(", "xmlhttprequest")
+_ASSET_REF = re.compile(r'(?:src|href)\s*=\s*["\']assets/([^"\']+)["\']')
 
 
-def _validate(html: str, scene_count: int, total: float) -> Tuple[bool, str]:
+def _validate(html: str, scene_count: int, total: float, asset_files=None) -> Tuple[bool, str]:
     """Cheap structural check. Returns ``(ok, reason)``; reason guides the retry."""
     if not html or "Error: " in html[:64]:
         return False, "empty or error response"
@@ -118,13 +147,20 @@ def _validate(html: str, scene_count: int, total: float) -> Tuple[bool, str]:
             return False, f"forbidden non-deterministic call: {bad}"
     if "data-duration" not in html:
         return False, "clips missing data-duration"
+    # Any referenced asset must actually have been staged, or the render 404s.
+    allowed = {str(a).split("/")[-1] for a in (asset_files or [])}
+    for ref in _ASSET_REF.findall(html):
+        if ref.split("/")[-1] not in allowed:
+            return False, f"references assets/{ref} which was not provided; only use listed AVAILABLE ASSETS"
     return True, ""
 
 
-def author_composition(scenes: List[Scene], subject: str, width: int, height: int) -> str:
+def author_composition(scenes: List[Scene], subject: str, width: int, height: int, backgrounds=None) -> str:
     """Author + validate a composition. Returns full HTML, or ``""`` on failure.
 
-    One retry with the validation error fed back to the model.
+    ``backgrounds`` is an optional list of staged assets (Background dataclass or
+    bare file names) the model may reference as ``assets/<file>``. One retry with
+    the validation error fed back to the model.
     """
     if not scenes:
         return ""
@@ -132,19 +168,29 @@ def author_composition(scenes: List[Scene], subject: str, width: int, height: in
     if total <= 0:
         return ""
 
+    asset_files = [_asset_name(b) for b in (backgrounds or [])]
     feedback = ""
     for attempt in (1, 2):
-        prompt = _build_prompt(scenes, subject, width, height, total, feedback)
+        prompt = _build_prompt(scenes, subject, width, height, total, feedback, backgrounds)
         try:
             raw = llm._generate_response(prompt=prompt)
         except Exception as exc:  # noqa: BLE001 - authoring is best-effort
             logger.warning(f"hyperframes authoring LLM call failed (attempt {attempt}): {exc}")
             return ""
         html = _strip_fences(raw)
-        ok, reason = _validate(html, len(scenes), total)
+        ok, reason = _validate(html, len(scenes), total, asset_files)
         if ok:
             logger.success(f"hyperframes: composition authored on attempt {attempt} ({len(html)} chars)")
             return html
         logger.warning(f"hyperframes: composition rejected (attempt {attempt}): {reason}")
         feedback = reason
     return ""
+
+
+def author_block(scenes: List[Scene], subject: str, width: int, height: int, backgrounds=None) -> str:
+    """Author a composition for one contiguous block of MG scenes.
+
+    The caller re-bases the block's scene start times to begin at 0 so the block
+    renders as a standalone segment; otherwise identical to ``author_composition``.
+    """
+    return author_composition(scenes, subject, width, height, backgrounds=backgrounds)

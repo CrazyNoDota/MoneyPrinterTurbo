@@ -128,11 +128,6 @@ def _videogen_enabled(params) -> bool:
     return bool(getattr(params, "video_gen_enabled", False)) or videogen.is_enabled()
 
 
-def _hyperframes_enabled(params) -> bool:
-    """Whether to build the whole video from a motion-graphics composition."""
-    return hyperframes.is_enabled(params)
-
-
 def _build_clip_specs(params, video_terms):
     """Build AI-clip specs from on-theme images (image2video) or terms (text2video)."""
     aspect = getattr(params.video_aspect, "value", params.video_aspect) or "9:16"
@@ -721,9 +716,22 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     # track timed to the narration instead of gathering stock/local footage; if it
     # produces nothing (toolchain missing / authoring failed), fall back to stock.
     hf_video = ""
-    if _hyperframes_enabled(params):
+    hf_mode = hyperframes.mode(params)
+    if hf_mode == "mixed":
+        # Director: LLM tags each scene footage vs motion-graphics; footage stays
+        # native, MG scenes are rendered, and the segments are stitched in order.
+        hf_video = hyperframes.render_directed_video(
+            task_id, params, video_script, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms, material_hints=material_hints,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes director produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "hyperframes":
         hf_video = hyperframes.render_video(
-            task_id, params, video_script, audio_file, subtitle_path, audio_duration
+            task_id, params, video_script, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
         )
         if not hf_video:
             logger.warning(

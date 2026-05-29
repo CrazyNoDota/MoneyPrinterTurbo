@@ -189,12 +189,26 @@ video_gen_poll_interval = 5   # seconds between status polls
 # Chrome + ffmpeg). Great for text-driven explainer/finance shorts; not a
 # replacement for scenic b-roll. Run setup-hyperframes.bat once to install the
 # toolchain. All failures are non-fatal -- the pipeline falls back to stock footage.
-hyperframes_enabled = false   # solely-hyperframes mode (no stock footage)
+# video_visual_mode selects how the visual track is built (overrides hyperframes_enabled):
+#   "footage"     stock/local footage only (default)
+#   "hyperframes" solely motion-graphics, timed to the narration
+#   "mixed"       the "director": the LLM tags each scene as real footage or motion
+#                 graphics; footage scenes stay native, MG scenes are rendered, and the
+#                 segments are stitched together in order.
+# Leave empty to fall back to hyperframes_enabled below.
+video_visual_mode = ""
+hyperframes_enabled = false   # solely-hyperframes mode (equivalent to video_visual_mode="hyperframes")
 hyperframes_dir = ".hyperframes"   # project dir created by setup-hyperframes.bat
 hyperframes_version = "0.6.58"     # pinned CLI version for reproducible renders
 hyperframes_node = ""         # optional dir containing node/npx; else found on PATH
 hyperframes_fps = 30
 hyperframes_timeout = 600     # seconds to wait for a single render before giving up
+# Real photo backgrounds behind motion-graphics scenes (solely + mixed). Pulled from
+# the stock photo APIs and staged into .hyperframes/assets/ (a local file, so the
+# render stays deterministic). hyperframes_image_provider defaults to video_source.
+hyperframes_images = true
+hyperframes_image_provider = ""   # "pexels" | "pixabay" | "" (follow video_source)
+hyperframes_bg_count = 1          # background photos fetched per motion-graphics scene
 
 ########## Qwen3-TTS (local voice, isolated env)
 # A high-quality local neural TTS (more natural than Silero, supports Russian +

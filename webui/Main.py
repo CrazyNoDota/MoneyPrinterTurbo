@@ -721,14 +721,32 @@ with middle_panel:
             if not (config.app.get("vision_api_key") or config.app.get("nvidia_api_key")):
                 st.warning(tr("Vision API key not set"))
 
-        # 用 LLM 编写的动态图形(动感文字/数字动画)整片渲染,替代实拍素材,适合解说类短视频。
-        params.hyperframes_enabled = st.checkbox(
-            tr("Generate with Hyperframes (motion graphics, no stock footage)"),
-            value=config.app.get("hyperframes_enabled", False),
-            help=tr("An LLM authors an animated HTML/GSAP composition timed to the narration, rendered locally to video. Run setup-hyperframes.bat once."),
+        # 视觉模式:实拍素材 / 纯动态图形 / 混合"导演"模式(LLM 逐场景决定实拍或动态图形)。
+        _visual_modes = ["footage", "hyperframes", "mixed"]
+        _visual_labels = {
+            "footage": tr("Footage (stock / local)"),
+            "hyperframes": tr("Motion graphics only"),
+            "mixed": tr("Mixed (director: footage + motion graphics)"),
+        }
+
+        def _initial_visual_mode():
+            m = (config.app.get("video_visual_mode", "") or "").strip().lower()
+            if m in _visual_modes:
+                return m
+            return "hyperframes" if config.app.get("hyperframes_enabled", False) else "footage"
+
+        params.video_visual_mode = st.radio(
+            tr("Visual mode"),
+            options=_visual_modes,
+            format_func=lambda m: _visual_labels[m],
+            index=_visual_modes.index(_initial_visual_mode()),
+            help=tr("Footage = stock/local clips. Motion graphics = an LLM-authored animated composition (with optional photo backgrounds). Mixed = the LLM tags each scene footage vs motion graphics and stitches them. Run setup-hyperframes.bat once for the last two."),
         )
+        config.app["video_visual_mode"] = params.video_visual_mode
+        # Keep the legacy flag in sync so API callers / config see a consistent state.
+        params.hyperframes_enabled = params.video_visual_mode == "hyperframes"
         config.app["hyperframes_enabled"] = params.hyperframes_enabled
-        if params.hyperframes_enabled:
+        if params.video_visual_mode in ("hyperframes", "mixed"):
             from app.services import hyperframes
             if not hyperframes.is_available():
                 st.warning(tr("Hyperframes not installed — run setup-hyperframes.bat"))

@@ -109,6 +109,14 @@ class VideoParams(BaseModel):
     # locally, instead of stock footage. Off by default; toolchain + options live
     # in config.toml ([app].hyperframes_*). See app/services/hyperframes.
     hyperframes_enabled: Optional[bool] = False
+    # Visual mode selector (takes precedence over hyperframes_enabled):
+    #   "footage"     -> stock/local footage (default, unchanged)
+    #   "hyperframes" -> solely motion-graphics (with on-demand photo backgrounds)
+    #   "mixed"       -> the director: LLM tags each scene footage vs motion-graphics,
+    #                    footage stays native, MG scenes are rendered, segments stitched.
+    # Default None = unset, so hyperframes.mode() falls back to hyperframes_enabled /
+    # config, then to "footage". The WebUI sets this explicitly.
+    video_visual_mode: Optional[str] = None
 
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
     video_language: Optional[str] = ""  # auto detect
