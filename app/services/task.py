@@ -10,6 +10,7 @@ from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
 from app.services import (
+    hyperframes,
     llm,
     material,
     pinterest,
@@ -125,6 +126,11 @@ def load_resumable_script(task_id):
 
 def _videogen_enabled(params) -> bool:
     return bool(getattr(params, "video_gen_enabled", False)) or videogen.is_enabled()
+
+
+def _hyperframes_enabled(params) -> bool:
+    """Whether to build the whole video from a motion-graphics composition."""
+    return hyperframes.is_enabled(params)
 
 
 def _build_clip_specs(params, video_terms):
@@ -534,7 +540,7 @@ def _gather_base_materials(task_id, params, video_terms, audio_duration):
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path
+    task_id, params, downloaded_videos, audio_file, subtitle_path, prebuilt_video=None
 ):
     final_video_paths = []
     combined_video_paths = []
@@ -546,20 +552,26 @@ def generate_final_videos(
     _progress = 50
     for i in range(params.video_count):
         index = i + 1
-        combined_video_path = path.join(
-            utils.task_dir(task_id), f"combined-{index}.mp4"
-        )
-        logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-        )
+        if prebuilt_video:
+            # Hyperframes already produced a full-length, aspect-correct visual
+            # track; use it directly instead of concatenating/cropping clips.
+            combined_video_path = prebuilt_video
+            logger.info(f"\n\n## using hyperframes video: {index} => {combined_video_path}")
+        else:
+            combined_video_path = path.join(
+                utils.task_dir(task_id), f"combined-{index}.mp4"
+            )
+            logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
@@ -705,10 +717,25 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
-    # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id, params, video_terms, audio_duration
-    )
+    # 5. Get video materials. In solely-hyperframes mode, render a motion-graphics
+    # track timed to the narration instead of gathering stock/local footage; if it
+    # produces nothing (toolchain missing / authoring failed), fall back to stock.
+    hf_video = ""
+    if _hyperframes_enabled(params):
+        hf_video = hyperframes.render_video(
+            task_id, params, video_script, audio_file, subtitle_path, audio_duration
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes mode produced no video; falling back to stock/local footage"
+            )
+
+    if hf_video:
+        downloaded_videos = [hf_video]
+    else:
+        downloaded_videos = get_video_materials(
+            task_id, params, video_terms, audio_duration
+        )
     if not downloaded_videos:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -731,7 +758,8 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 6. Generate final videos
     final_video_paths, combined_video_paths = generate_final_videos(
-        task_id, params, downloaded_videos, audio_file, subtitle_path
+        task_id, params, downloaded_videos, audio_file, subtitle_path,
+        prebuilt_video=hf_video or None,
     )
 
     if not final_video_paths:

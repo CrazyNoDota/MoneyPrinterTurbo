@@ -721,6 +721,18 @@ with middle_panel:
             if not (config.app.get("vision_api_key") or config.app.get("nvidia_api_key")):
                 st.warning(tr("Vision API key not set"))
 
+        # 用 LLM 编写的动态图形(动感文字/数字动画)整片渲染,替代实拍素材,适合解说类短视频。
+        params.hyperframes_enabled = st.checkbox(
+            tr("Generate with Hyperframes (motion graphics, no stock footage)"),
+            value=config.app.get("hyperframes_enabled", False),
+            help=tr("An LLM authors an animated HTML/GSAP composition timed to the narration, rendered locally to video. Run setup-hyperframes.bat once."),
+        )
+        config.app["hyperframes_enabled"] = params.hyperframes_enabled
+        if params.hyperframes_enabled:
+            from app.services import hyperframes
+            if not hyperframes.is_available():
+                st.warning(tr("Hyperframes not installed — run setup-hyperframes.bat"))
+
         selected_index = st.selectbox(
             tr("Video Concat Mode"),
             index=1,

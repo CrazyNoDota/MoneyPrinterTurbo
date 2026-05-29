@@ -104,6 +104,11 @@ class VideoParams(BaseModel):
     video_gen_enabled: Optional[bool] = False
     video_gen_provider: Optional[str] = None  # null | replicate | fal | http
     video_gen_count: Optional[int] = 2
+    # Solely-hyperframes mode: build the whole video from an LLM-authored
+    # motion-graphics composition (kinetic typography, animated numbers) rendered
+    # locally, instead of stock footage. Off by default; toolchain + options live
+    # in config.toml ([app].hyperframes_*). See app/services/hyperframes.
+    hyperframes_enabled: Optional[bool] = False
 
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
     video_language: Optional[str] = ""  # auto detect
