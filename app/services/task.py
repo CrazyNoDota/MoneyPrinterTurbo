@@ -161,20 +161,34 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
+def _download_stock_videos(task_id, params, video_terms, required_duration):
+    """Download stock footage to cover ``required_duration`` seconds.
+
+    Used both for pure stock sources and to top up local uploads. Only the
+    pexels/pixabay providers support keyword search; other providers fall back
+    to pexels.
+    """
+    source = (params.stock_source or "pexels").strip().lower()
+    if source not in ("pexels", "pixabay"):
+        source = "pexels"
+
+    logger.info(f"\n\n## downloading videos from {source}")
+    return material.download_videos(
+        task_id=task_id,
+        search_terms=video_terms,
+        source=source,
+        video_aspect=params.video_aspect,
+        video_contact_mode=params.video_concat_mode,
+        # never request less than a single clip so the search still returns hits
+        audio_duration=max(required_duration, params.video_clip_duration),
+        max_clip_duration=params.video_clip_duration,
+    )
+
+
 def get_video_materials(task_id, params, video_terms, audio_duration):
-    if params.video_source == "local":
-        logger.info("\n\n## preprocess local materials")
-        materials = video.preprocess_video(
-            materials=params.video_materials, clip_duration=params.video_clip_duration
-        )
-        if not materials:
-            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-            logger.error(
-                "no valid materials found, please check the materials and try again."
-            )
-            return None
-        return [material_info.url for material_info in materials]
-    else:
+    # A non-local source keeps the original behavior: download everything from
+    # the chosen stock provider.
+    if params.video_source != "local":
         logger.info(f"\n\n## downloading videos from {params.video_source}")
         downloaded_videos = material.download_videos(
             task_id=task_id,
@@ -192,6 +206,55 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             )
             return None
         return downloaded_videos
+
+    # Local source: use all uploaded materials first, then optionally fill the
+    # remaining audio duration with stock footage. With no uploads at all, fall
+    # back to stock for the full duration so a video can still be produced.
+    material_paths = []
+    local_duration = 0.0
+    if params.video_materials:
+        logger.info("\n\n## preprocess local materials")
+        materials = video.preprocess_video(
+            materials=params.video_materials, clip_duration=params.video_clip_duration
+        )
+        for material_info in materials:
+            material_paths.append(material_info.url)
+        # each preprocessed clip contributes up to one clip_duration to the video
+        local_duration = len(materials) * params.video_clip_duration
+
+    required_duration = audio_duration * params.video_count
+    remaining = required_duration - local_duration
+    no_uploads = not material_paths
+    should_fill = no_uploads or (params.fill_with_stock and remaining > 0)
+
+    if should_fill and video_terms:
+        fill_duration = required_duration if no_uploads else remaining
+        try:
+            downloaded_videos = _download_stock_videos(
+                task_id, params, video_terms, fill_duration
+            )
+            if downloaded_videos:
+                logger.info(
+                    f"added {len(downloaded_videos)} stock clips to fill ~{fill_duration:.0f}s"
+                )
+                material_paths.extend(downloaded_videos)
+            elif no_uploads:
+                logger.error(
+                    "failed to download videos, maybe the network is not available. if you are in China, please use a VPN."
+                )
+        except Exception as e:
+            # If we already have local clips, a failed top-up is non-fatal.
+            logger.warning(f"failed to fill with stock footage: {str(e)}")
+    elif should_fill and not video_terms:
+        logger.warning("no video terms available, skip stock footage fill")
+
+    if not material_paths:
+        sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        logger.error(
+            "no valid materials found, please check the materials and try again."
+        )
+        return None
+    return material_paths
 
 
 def generate_final_videos(
@@ -264,12 +327,25 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         return {"script": video_script}
 
     # 2. Generate terms
+    # Stock footage (used as primary source, or to top up local uploads) needs
+    # search keywords. Generate them whenever stock footage may be used.
     video_terms = ""
+    local_may_use_stock = params.video_source == "local" and (
+        params.fill_with_stock or not params.video_materials
+    )
     if params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return
+    elif local_may_use_stock:
+        # In local mode a terms failure is non-fatal: we can still fall back to
+        # the uploaded materials only.
+        video_terms = generate_terms(task_id, params, video_script)
+        if not video_terms:
+            logger.warning(
+                "failed to generate video terms; stock footage fill will be skipped"
+            )
 
     save_script_data(task_id, video_script, video_terms, params)
 

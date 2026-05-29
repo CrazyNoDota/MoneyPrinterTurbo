@@ -641,6 +641,32 @@ with middle_panel:
                 accept_multiple_files=True,
             )
 
+            # 上传素材不足以覆盖音频时长时，可自动用 Pexels/Pixabay 素材补足。
+            # 即使关闭该选项，未上传任何素材时也会自动回退到在线素材。
+            params.fill_with_stock = st.checkbox(
+                tr("Fill remaining duration with stock footage"),
+                value=config.app.get("fill_with_stock", False),
+            )
+            config.app["fill_with_stock"] = params.fill_with_stock
+
+            if params.fill_with_stock:
+                stock_sources = [
+                    (tr("Pexels"), "pexels"),
+                    (tr("Pixabay"), "pixabay"),
+                ]
+                saved_stock_source = config.app.get("stock_source", "pexels")
+                saved_stock_index = [s[1] for s in stock_sources].index(
+                    saved_stock_source
+                ) if saved_stock_source in [s[1] for s in stock_sources] else 0
+                stock_index = st.selectbox(
+                    tr("Stock Source"),
+                    options=range(len(stock_sources)),
+                    format_func=lambda x: stock_sources[x][0],
+                    index=saved_stock_index,
+                )
+                params.stock_source = stock_sources[stock_index][1]
+                config.app["stock_source"] = params.stock_source
+
         selected_index = st.selectbox(
             tr("Video Concat Mode"),
             index=1,

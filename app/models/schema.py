@@ -83,7 +83,12 @@ class VideoParams(BaseModel):
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
     )
-    
+    # When video_source == "local": after using all uploaded materials, top up the
+    # remaining audio duration with stock footage. If nothing is uploaded at all,
+    # stock footage is used for the full duration regardless of this flag.
+    fill_with_stock: Optional[bool] = False
+    stock_source: Optional[str] = "pexels"  # provider for the top-up (pexels | pixabay)
+
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
     video_language: Optional[str] = ""  # auto detect
 

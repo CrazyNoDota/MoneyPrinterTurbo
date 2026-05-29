@@ -89,6 +89,8 @@
     "Bilibili": "Bilibili (Bilibili support is coming soon)",
     "Xiaohongshu": "Xiaohongshu (Xiaohongshu support is coming soon)",
     "Local file": "Local file",
+    "Fill remaining duration with stock footage": "Fill remaining duration with stock footage (uses your uploads first, then Pexels/Pixabay)",
+    "Stock Source": "Stock Footage Source",
     "Play Voice": "Play Voice",
     "Voice Example": "This is an example text for testing speech synthesis",
     "Synthesizing Voice": "Synthesizing voice, please wait...",

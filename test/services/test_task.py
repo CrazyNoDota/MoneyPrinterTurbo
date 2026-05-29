@@ -2,6 +2,7 @@ import unittest
 import os
 import sys
 from pathlib import Path
+from unittest import mock
 
 # add project root to python path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -60,7 +61,83 @@ class TestTaskService(unittest.TestCase):
         )
         result = tm.start(task_id=task_id, params=params)
         print(result)
-    
+
+
+class TestGetVideoMaterials(unittest.TestCase):
+    """Hybrid material gathering: uploads first, then fill gaps with stock."""
+
+    TASK_ID = "00000000-0000-0000-0000-000000000001"
+
+    def _params(self, **overrides):
+        defaults = dict(
+            video_subject="money",
+            video_clip_duration=3,
+            video_count=1,
+            video_source="local",
+        )
+        defaults.update(overrides)
+        return VideoParams(**defaults)
+
+    def test_local_fill_gap_appends_stock_after_uploads(self):
+        # 1 local clip (3s) but 10s of audio + fill enabled -> top up with stock.
+        params = self._params(
+            fill_with_stock=True,
+            video_materials=[MaterialInfo(provider="local", url="local1.mp4")],
+        )
+        with mock.patch.object(
+            tm.video, "preprocess_video",
+            return_value=[MaterialInfo(provider="local", url="local1.mp4")],
+        ), mock.patch.object(
+            tm.material, "download_videos",
+            return_value=["stock1.mp4", "stock2.mp4"],
+        ) as dl:
+            result = tm.get_video_materials(
+                self.TASK_ID, params, ["money"], audio_duration=10
+            )
+        self.assertEqual(result, ["local1.mp4", "stock1.mp4", "stock2.mp4"])
+        dl.assert_called_once()
+
+    def test_local_no_fill_uses_uploads_only(self):
+        params = self._params(
+            fill_with_stock=False,
+            video_materials=[MaterialInfo(provider="local", url="local1.mp4")],
+        )
+        with mock.patch.object(
+            tm.video, "preprocess_video",
+            return_value=[MaterialInfo(provider="local", url="local1.mp4")],
+        ), mock.patch.object(tm.material, "download_videos") as dl:
+            result = tm.get_video_materials(
+                self.TASK_ID, params, ["money"], audio_duration=10
+            )
+        self.assertEqual(result, ["local1.mp4"])
+        dl.assert_not_called()
+
+    def test_local_no_uploads_falls_back_to_stock(self):
+        # No uploads at all -> use stock for the full duration even without flag.
+        params = self._params(fill_with_stock=False, video_materials=None)
+        with mock.patch.object(tm.video, "preprocess_video") as pp, \
+            mock.patch.object(
+                tm.material, "download_videos", return_value=["s1.mp4"]
+            ) as dl:
+            result = tm.get_video_materials(
+                self.TASK_ID, params, ["money"], audio_duration=10
+            )
+        self.assertEqual(result, ["s1.mp4"])
+        pp.assert_not_called()
+        dl.assert_called_once()
+
+    def test_non_local_source_unchanged(self):
+        params = self._params(video_source="pexels")
+        with mock.patch.object(
+            tm.material, "download_videos", return_value=["p1.mp4"]
+        ) as dl:
+            result = tm.get_video_materials(
+                self.TASK_ID, params, ["money"], audio_duration=10
+            )
+        self.assertEqual(result, ["p1.mp4"])
+        # full duration requested from the chosen source
+        self.assertEqual(dl.call_args.kwargs["source"], "pexels")
+
 
 if __name__ == "__main__":
-    unittest.main() 
+    unittest.main()
