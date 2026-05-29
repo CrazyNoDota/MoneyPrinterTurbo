@@ -122,11 +122,12 @@ class VideoParams(BaseModel):
 
     subtitle_enabled: Optional[bool] = True
     subtitle_position: Optional[str] = config.ui.get("subtitle_position", "bottom")  # top, bottom, center, custom
-    # Caption look: "outline" (clean, no box, thick outline - default),
-    # "shadow" (outline + soft drop shadow), or "box" (legacy background box).
-    subtitle_style: Optional[str] = config.ui.get("subtitle_style", "outline")
+    # Caption look: "tiktok" (ALL-CAPS, heavy outline + shadow - default),
+    # "outline" (clean, no box, thick outline), "shadow" (outline + soft drop
+    # shadow), or "box" (legacy background box).
+    subtitle_style: Optional[str] = config.ui.get("subtitle_style", "tiktok")
     custom_position: float = config.ui.get("custom_position", 70.0)
-    font_name: Optional[str] = "STHeitiMedium.ttc"
+    font_name: Optional[str] = config.ui.get("font_name", "Anton-Regular.ttf")
     text_fore_color: Optional[str] = "#FFFFFF"
     text_background_color: Union[bool, str] = True
 

@@ -1043,7 +1043,7 @@ with right_panel:
         st.write(tr("Subtitle Settings"))
         params.subtitle_enabled = st.checkbox(tr("Enable Subtitles"), value=True)
         font_names = get_all_fonts()
-        saved_font_name = config.ui.get("font_name", "MicrosoftYaHeiBold.ttc")
+        saved_font_name = config.ui.get("font_name", "Anton-Regular.ttf")
         saved_font_name_index = 0
         if saved_font_name in font_names:
             saved_font_name_index = font_names.index(saved_font_name)
@@ -1074,11 +1074,12 @@ with right_panel:
         config.ui["subtitle_position"] = params.subtitle_position
 
         subtitle_styles = [
+            (tr("TikTok (punchy, all-caps)"), "tiktok"),
             (tr("Outline (clean)"), "outline"),
             (tr("Drop Shadow"), "shadow"),
             (tr("Background Box"), "box"),
         ]
-        saved_subtitle_style = config.ui.get("subtitle_style", "outline")
+        saved_subtitle_style = config.ui.get("subtitle_style", "tiktok")
         saved_style_index = 0
         for i, (_, style_value) in enumerate(subtitle_styles):
             if style_value == saved_subtitle_style:

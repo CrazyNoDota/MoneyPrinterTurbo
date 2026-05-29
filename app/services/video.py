@@ -533,7 +533,7 @@ def generate_video(
     font_path = ""
     if params.subtitle_enabled:
         if not params.font_name:
-            params.font_name = "STHeitiMedium.ttc"
+            params.font_name = "Anton-Regular.ttf"
         font_path = os.path.join(utils.font_dir(), params.font_name)
         if os.name == "nt":
             font_path = font_path.replace("\\", "/")
@@ -549,10 +549,11 @@ def generate_video(
         return params.text_background_color
 
     # Subtitle look:
-    #   outline -> no box, thick outline (clean modern "shorts" caption; default)
+    #   tiktok  -> ALL-CAPS, heavy outline + drop shadow (loud viral "shorts" look; default)
+    #   outline -> no box, thick outline (clean modern caption)
     #   shadow  -> outline + a soft drop shadow for extra pop
     #   box     -> the legacy solid background box (uses text_background_color)
-    subtitle_style = (getattr(params, "subtitle_style", "") or "outline").strip().lower()
+    subtitle_style = (getattr(params, "subtitle_style", "") or "tiktok").strip().lower()
 
     def create_text_clips(subtitle_item):
         """Return the positioned clip(s) for one subtitle line.
@@ -562,6 +563,10 @@ def generate_video(
         """
         font_size = int(params.font_size)
         phrase = subtitle_item[1]
+        # The punchy "tiktok" look is all-caps. Uppercase before wrapping so the
+        # line-width math uses the (wider) capital glyphs and nothing overflows.
+        if subtitle_style == "tiktok":
+            phrase = phrase.upper()
         max_width = video_width * 0.9
         wrapped_txt, txt_height = wrap_text(
             phrase, max_width=max_width, font=font_path, fontsize=font_size
@@ -585,6 +590,10 @@ def generate_video(
         if subtitle_style == "box":
             bg_color = resolve_subtitle_background_color()
             stroke_width = provided_stroke
+        elif subtitle_style == "tiktok":
+            # Loud captions need a heavy outline so the words punch off any footage.
+            bg_color = None
+            stroke_width = max(provided_stroke, max(4, round(font_size * 0.09)))
         else:
             bg_color = None
             stroke_width = max(provided_stroke, max(2, round(font_size * 0.05)))
@@ -633,7 +642,7 @@ def generate_video(
             )
 
         clips = []
-        if subtitle_style == "shadow":
+        if subtitle_style in ("shadow", "tiktok"):
             offset = max(2, round(font_size * 0.06))
             shadow_clip = TextClip(
                 color="#000000",
