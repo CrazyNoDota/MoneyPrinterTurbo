@@ -77,11 +77,27 @@ class TestPinterestParse(unittest.TestCase):
         )
 
 
+def _fake_session(resource_resp=None, get_side_effect=None):
+    """Build a Mock requests.Session.
+
+    search_images() calls session.get twice: once to prime cookies, once for the
+    resource endpoint. The priming call's return value is ignored, so returning
+    ``resource_resp`` for every call is fine for these tests.
+    """
+    session = mock.Mock()
+    session.cookies.get.return_value = "csrf-token"
+    if get_side_effect is not None:
+        session.get.side_effect = get_side_effect
+    else:
+        session.get.return_value = resource_resp
+    return session
+
+
 class TestPinterestSearch(unittest.TestCase):
     def test_search_images_empty_query_skips_network(self):
-        with mock.patch.object(pinterest.requests, "get") as get:
+        with mock.patch.object(pinterest.requests, "Session") as sess:
             self.assertEqual(pinterest.search_images("   "), [])
-        get.assert_not_called()
+        sess.assert_not_called()
 
     def test_search_images_returns_capped_urls(self):
         payload = {
@@ -97,13 +113,17 @@ class TestPinterestSearch(unittest.TestCase):
         fake_resp = mock.Mock()
         fake_resp.json.return_value = payload
         fake_resp.raise_for_status.return_value = None
-        with mock.patch.object(pinterest.requests, "get", return_value=fake_resp):
+        with mock.patch.object(
+            pinterest.requests, "Session", return_value=_fake_session(fake_resp)
+        ):
             urls = pinterest.search_images("money", limit=3)
         self.assertEqual(urls, ["https://x/0.jpg", "https://x/1.jpg", "https://x/2.jpg"])
 
     def test_search_images_swallows_network_errors(self):
         with mock.patch.object(
-            pinterest.requests, "get", side_effect=RuntimeError("boom")
+            pinterest.requests,
+            "Session",
+            return_value=_fake_session(get_side_effect=RuntimeError("boom")),
         ):
             self.assertEqual(pinterest.search_images("money"), [])
 

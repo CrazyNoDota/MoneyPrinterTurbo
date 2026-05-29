@@ -15,7 +15,7 @@ they are analyzed by the vision model just like uploaded materials.
 import json
 import os
 from typing import List
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 from loguru import logger
@@ -26,11 +26,13 @@ from app.utils import utils
 
 _SEARCH_URL = "https://www.pinterest.com/resource/BaseSearchResource/get/"
 
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
 _HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": _USER_AGENT,
     "Accept": "application/json, text/javascript, */*, q=0.01",
     "X-Requested-With": "XMLHttpRequest",
 }
@@ -94,27 +96,54 @@ def parse_results(payload: dict) -> List[str]:
 
 
 def search_images(query: str, limit: int = 6) -> List[str]:
-    """Query Pinterest and return up to ``limit`` image URLs (best effort)."""
+    """Query Pinterest and return up to ``limit`` image URLs (best effort).
+
+    Pinterest's resource endpoint rejects bare requests ("Invalid Resource
+    Request"). It needs (1) session cookies incl. a ``csrftoken`` obtained by
+    first loading the search page, and (2) the web client's PWS-handler headers.
+    """
     query = (query or "").strip()
     if not query:
         return []
 
-    # Ask for a few extra so the resolution filter downstream still leaves enough.
-    page_size = max(int(limit) * 2, int(limit))
-    data = {
-        "options": {"query": query, "scope": "pins", "page_size": page_size},
-        "context": {},
-    }
-    params = {
-        "source_url": f"/search/pins/?q={query}&rs=typed",
-        "data": json.dumps(data, separators=(",", ":")),
-    }
-    url = f"{_SEARCH_URL}?{urlencode(params)}"
-    headers = dict(_HEADERS, Referer=f"https://www.pinterest.com/search/pins/?q={query}")
+    referer = f"https://www.pinterest.com/search/pins/?q={quote(query)}"
+    session = requests.Session()
+    session.headers.update(
+        {"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
+    )
 
     logger.info(f"searching pinterest images for '{query}'")
     try:
-        r = requests.get(
+        # 1. Prime the session: the search page sets csrftoken / session cookies.
+        session.get(
+            referer,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+            timeout=(30, 60),
+        )
+
+        # Ask for extra so the resolution filter downstream still leaves enough.
+        page_size = max(int(limit) * 2, int(limit))
+        data = {
+            "options": {"query": query, "scope": "pins", "page_size": page_size},
+            "context": {},
+        }
+        params = {
+            "source_url": f"/search/pins/?q={query}&rs=typed",
+            "data": json.dumps(data, separators=(",", ":")),
+        }
+        url = f"{_SEARCH_URL}?{urlencode(params)}"
+        headers = dict(
+            _HEADERS,
+            Referer=referer,
+            **{
+                "X-Pinterest-PWS-Handler": "www/search/[scope].js",
+                "X-Pinterest-AppState": "active",
+                "X-APP-VERSION": "a8f6e8c",
+                "X-CSRFToken": session.cookies.get("csrftoken", ""),
+            },
+        )
+        r = session.get(
             url,
             headers=headers,
             proxies=config.proxy,
@@ -126,6 +155,8 @@ def search_images(query: str, limit: int = 6) -> List[str]:
     except Exception as e:
         logger.warning(f"pinterest search failed for '{query}': {e}")
         return []
+    finally:
+        session.close()
 
     logger.info(f"pinterest returned {len(urls)} image(s) for '{query}'")
     return urls[: int(limit)]
