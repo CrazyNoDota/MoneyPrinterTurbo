@@ -117,6 +117,8 @@
     "Pixabay API Key added successfully": "Thêm API Key Pixabay thành công",
     "Select Pixabay API Key to delete": "Chọn API Key Pixabay để xóa",
     "Delete Selected Pixabay API Key": "Xóa API Key Pixabay đã chọn",
-    "Pixabay API Key deleted successfully": "Xóa API Key Pixabay thành công"
+    "Pixabay API Key deleted successfully": "Xóa API Key Pixabay thành công",
+    "Script Length (paragraphs)": "Độ dài kịch bản (đoạn văn)",
+    "More paragraphs = longer narration and a longer video": "Nhiều đoạn hơn = lời thuyết minh và video dài hơn"
   }
 }

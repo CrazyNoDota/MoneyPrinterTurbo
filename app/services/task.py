@@ -8,7 +8,7 @@ from loguru import logger
 from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
-from app.services import llm, material, subtitle, video, vision, voice, upload_post
+from app.services import llm, material, pinterest, subtitle, video, vision, voice, upload_post
 from app.services import state as sm
 from app.utils import utils
 
@@ -47,6 +47,44 @@ def get_material_keywords(materials):
             seen.add(key)
             unique.append(h)
     return unique
+
+
+def _pinterest_enabled(params) -> bool:
+    return bool(getattr(params, "pinterest_enabled", False)) or pinterest.is_enabled()
+
+
+def augment_with_pinterest(params):
+    """Scrape themed Pinterest photos and prepend them to the local materials.
+
+    These images then flow through the normal pipeline: the vision model
+    describes them (informing the script + search terms) and they are blended
+    into the final video. Any failure is non-fatal -- generation continues with
+    whatever stock/local materials are available.
+    """
+    if not _pinterest_enabled(params):
+        return
+
+    query = (params.video_subject or "").strip()
+    if not query:
+        logger.warning("pinterest is enabled but video_subject is empty; skipping scrape")
+        return
+
+    count = getattr(params, "pinterest_count", None) or config.app.get(
+        "pinterest_count", 6
+    )
+    try:
+        scraped = pinterest.download_images(query, limit=int(count))
+    except Exception as e:
+        logger.warning(f"pinterest scrape failed, continuing without it: {e}")
+        return
+
+    if not scraped:
+        return
+
+    existing = list(params.video_materials or [])
+    # Prepend so the themed photos are analyzed first and lead the material list.
+    params.video_materials = scraped + existing
+    logger.info(f"added {len(scraped)} pinterest image(s) to the materials")
 
 
 def build_material_hints(params):
@@ -253,37 +291,12 @@ def _download_stock_videos(task_id, params, video_terms, required_duration):
     )
 
 
-def get_video_materials(task_id, params, video_terms, audio_duration):
-    # A non-local source keeps the original behavior: download everything from
-    # the chosen stock provider.
-    if params.video_source != "local":
-        logger.info(f"\n\n## downloading videos from {params.video_source}")
-        downloaded_videos = material.download_videos(
-            task_id=task_id,
-            search_terms=video_terms,
-            source=params.video_source,
-            video_aspect=params.video_aspect,
-            video_contact_mode=params.video_concat_mode,
-            audio_duration=audio_duration * params.video_count,
-            max_clip_duration=params.video_clip_duration,
-        )
-        if not downloaded_videos:
-            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-            logger.error(
-                "failed to download videos, maybe the network is not available. if you are in China, please use a VPN."
-            )
-            return None
-        return downloaded_videos
+def _preprocess_materials(params):
+    """Turn ``params.video_materials`` into validated clip paths.
 
-    # Local source: use all uploaded materials first, then optionally fill the
-    # remaining audio duration with stock footage. With no uploads at all, fall
-    # back to stock for the full duration so a video can still be produced.
-    # 若只提供了素材文件夹（常见于 API 调用），扫描文件夹生成素材列表。
-    if not params.video_materials and params.local_materials_dir:
-        params.video_materials = material.list_local_materials(
-            params.local_materials_dir
-        )
-
+    Covers both uploaded/local-folder assets and scraped images (e.g.
+    Pinterest). Returns ``(material_paths, contributed_duration)``.
+    """
     material_paths = []
     local_duration = 0.0
     if params.video_materials:
@@ -299,8 +312,55 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             material_paths.append(material_info.url)
         # each preprocessed clip contributes up to one clip_duration to the video
         local_duration = len(materials) * params.video_clip_duration
+    return material_paths, local_duration
 
+
+def get_video_materials(task_id, params, video_terms, audio_duration):
     required_duration = audio_duration * params.video_count
+
+    # A non-local source uses the chosen stock provider as the primary footage,
+    # but any scraped images (e.g. Pinterest in video_materials) are blended in
+    # and reduce how much stock we need to download.
+    if params.video_source != "local":
+        material_paths, local_duration = _preprocess_materials(params)
+        remaining = max(required_duration - local_duration, 0.0)
+        # When scraped images already cover the duration, still pull at least one
+        # stock clip so the video keeps some motion.
+        fill_duration = required_duration if not material_paths else remaining
+
+        downloaded_videos = []
+        if fill_duration > 0 or not material_paths:
+            logger.info(f"\n\n## downloading videos from {params.video_source}")
+            downloaded_videos = material.download_videos(
+                task_id=task_id,
+                search_terms=video_terms,
+                source=params.video_source,
+                video_aspect=params.video_aspect,
+                video_contact_mode=params.video_concat_mode,
+                audio_duration=fill_duration,
+                max_clip_duration=params.video_clip_duration,
+            )
+        # Lead with the scraped imagery, then the stock footage.
+        all_paths = material_paths + (downloaded_videos or [])
+        if not all_paths:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            logger.error(
+                "failed to download videos, maybe the network is not available. if you are in China, please use a VPN."
+            )
+            return None
+        return all_paths
+
+    # Local source: use all uploaded/scraped materials first, then optionally
+    # fill the remaining audio duration with stock footage. With no materials at
+    # all, fall back to stock for the full duration so a video can still be made.
+    # 若只提供了素材文件夹（常见于 API 调用），扫描文件夹生成素材列表。
+    if not params.video_materials and params.local_materials_dir:
+        params.video_materials = material.list_local_materials(
+            params.local_materials_dir
+        )
+
+    material_paths, local_duration = _preprocess_materials(params)
+
     remaining = required_duration - local_duration
     no_uploads = not material_paths
     should_fill = no_uploads or (params.fill_with_stock and remaining > 0)
@@ -399,6 +459,10 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         params.video_materials = material.list_local_materials(
             params.local_materials_dir
         )
+
+    # Scrape themed Pinterest photos (if enabled) so they are understood and
+    # blended in just like uploaded materials.
+    augment_with_pinterest(params)
 
     # Understand the local materials once (vision descriptions or file names) and
     # reuse the hints for both the script and the stock search terms.

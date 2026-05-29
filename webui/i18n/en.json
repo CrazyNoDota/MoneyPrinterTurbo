@@ -126,6 +126,8 @@
     "Pixabay API Key added successfully": "Pixabay API Key added successfully",
     "Select Pixabay API Key to delete": "Select Pixabay API Key to delete",
     "Delete Selected Pixabay API Key": "Delete Selected Pixabay API Key",
-    "Pixabay API Key deleted successfully": "Pixabay API Key deleted successfully"
+    "Pixabay API Key deleted successfully": "Pixabay API Key deleted successfully",
+    "Script Length (paragraphs)": "Script Length (paragraphs)",
+    "More paragraphs = longer narration and a longer video": "More paragraphs = longer narration and a longer video"
   }
 }

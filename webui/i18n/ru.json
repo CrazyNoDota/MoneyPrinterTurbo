@@ -100,6 +100,8 @@
     "Hide Log": "Скрыть журнал",
     "Hide Basic Settings": "Скрыть основные настройки\n\nПри скрытии панель основных настроек не будет отображаться на странице.\n\nДля повторного отображения установите `hide_config = false` в `config.toml`",
     "LLM Settings": "**Настройки LLM**",
-    "Video Source Settings": "**Настройки источника видео**"
+    "Video Source Settings": "**Настройки источника видео**",
+    "Script Length (paragraphs)": "Длина сценария (абзацы)",
+    "More paragraphs = longer narration and a longer video": "Больше абзацев — длиннее озвучка и видео"
   }
 }

@@ -126,6 +126,8 @@
     "Pixabay API Key added successfully": "Pixabay API Key 添加成功",
     "Select Pixabay API Key to delete": "选择要删除的 Pixabay API Key",
     "Delete Selected Pixabay API Key": "删除选定的 Pixabay API Key",
-    "Pixabay API Key deleted successfully": "Pixabay API Key 删除成功"
+    "Pixabay API Key deleted successfully": "Pixabay API Key 删除成功",
+    "Script Length (paragraphs)": "脚本长度（段落数）",
+    "More paragraphs = longer narration and a longer video": "段落越多，旁白和视频越长"
   }
 }

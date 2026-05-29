@@ -92,6 +92,11 @@ class VideoParams(BaseModel):
     # Folder of local assets to use as materials. When set, every supported file
     # in the folder is used and the folder is treated as an allowed material dir.
     local_materials_dir: Optional[str] = ""
+    # Scrape themed photos from Pinterest, analyze them with the vision model
+    # (feeding the script + search terms), and blend them into the final video
+    # alongside stock footage. Works on top of any video_source.
+    pinterest_enabled: Optional[bool] = False
+    pinterest_count: Optional[int] = 6
 
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
     video_language: Optional[str] = ""  # auto detect

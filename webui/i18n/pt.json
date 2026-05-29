@@ -117,6 +117,8 @@
     "Pixabay API Key added successfully": "Chave de API do Pixabay adicionada com sucesso",
     "Select Pixabay API Key to delete": "Selecione a chave de API do Pixabay para excluir",
     "Delete Selected Pixabay API Key": "Excluir chave de API do Pixabay selecionada",
-    "Pixabay API Key deleted successfully": "Chave de API do Pixabay excluída com sucesso"
+    "Pixabay API Key deleted successfully": "Chave de API do Pixabay excluída com sucesso",
+    "Script Length (paragraphs)": "Comprimento do roteiro (parágrafos)",
+    "More paragraphs = longer narration and a longer video": "Mais parágrafos = narração e vídeo mais longos"
   }
 }

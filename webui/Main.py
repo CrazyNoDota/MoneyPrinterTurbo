@@ -572,12 +572,24 @@ with left_panel:
         )
         params.video_language = video_languages[selected_index][1]
 
+        # 段落数量决定脚本长度，从而决定旁白与视频的时长，是控制视频长短的主要手段。
+        params.paragraph_number = st.slider(
+            tr("Script Length (paragraphs)"),
+            min_value=1,
+            max_value=10,
+            value=int(config.app.get("paragraph_number", 1)),
+            help=tr("More paragraphs = longer narration and a longer video"),
+        )
+        config.app["paragraph_number"] = params.paragraph_number
+
         if st.button(
             tr("Generate Video Script and Keywords"), key="auto_generate_script"
         ):
             with st.spinner(tr("Generating Video Script and Keywords")):
                 script = llm.generate_script(
-                    video_subject=params.video_subject, language=params.video_language
+                    video_subject=params.video_subject,
+                    language=params.video_language,
+                    paragraph_number=params.paragraph_number,
                 )
                 terms = llm.generate_terms(params.video_subject, script)
                 if "Error: " in script:
@@ -690,6 +702,24 @@ with middle_panel:
                 )
                 params.stock_source = stock_sources[stock_index][1]
                 config.app["stock_source"] = params.stock_source
+
+        # 抓取与主题相关的 Pinterest 图片，用视觉模型分析后混入视频，可与任意素材来源叠加。
+        params.pinterest_enabled = st.checkbox(
+            tr("Augment with Pinterest images"),
+            value=config.app.get("pinterest_enabled", False),
+            help=tr("Scrapes themed photos from Pinterest, analyzes them with the vision model, and blends them into the video"),
+        )
+        config.app["pinterest_enabled"] = params.pinterest_enabled
+        if params.pinterest_enabled:
+            params.pinterest_count = st.slider(
+                tr("Number of Pinterest images"),
+                min_value=1,
+                max_value=20,
+                value=int(config.app.get("pinterest_count", 6)),
+            )
+            config.app["pinterest_count"] = params.pinterest_count
+            if not (config.app.get("vision_api_key") or config.app.get("nvidia_api_key")):
+                st.warning(tr("Vision API key not set"))
 
         selected_index = st.selectbox(
             tr("Video Concat Mode"),
