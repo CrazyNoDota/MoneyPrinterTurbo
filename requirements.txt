@@ -19,10 +19,10 @@ socksio==1.0.0
 pydub==0.25.1
 litellm==1.60.0
 
-# Optional: only needed for the local Silero TTS (RU) voices. Heavy (~200MB+),
-# so install on demand rather than by default:
-#   pip install torch numpy scipy --index-url https://download.pytorch.org/whl/cpu
-# (numpy/scipy resolve from the default index; the v5_ru model ~140MB is
-#  downloaded on first use and cached under storage/models/silero/)
-# torch
-# scipy
+# Local Silero TTS (RU) runs on PyTorch. The CPU build comes from the PyTorch
+# index below (keeps the download small). The v5_ru model (~140MB) is fetched
+# on first use and cached under storage/models/silero/.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.12.0
+numpy==2.4.4
+scipy==1.17.1

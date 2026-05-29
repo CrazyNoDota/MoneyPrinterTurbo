@@ -31,6 +31,11 @@ dependencies = [
     "socksio==1.0.0",
     "pydub==0.25.1",
     "litellm==1.60.0",
+    # Local Silero TTS (RU) model runs on PyTorch. CPU build pulled from the
+    # PyTorch CPU index (see [tool.uv.sources]) to keep the download small.
+    "torch==2.12.0",
+    "numpy==2.4.4",
+    "scipy==1.17.1",
 ]
 
 [project.optional-dependencies]
@@ -44,3 +49,15 @@ packages = ["app"]
 [tool.uv]
 # 当前项目以应用运行形态为主，不作为可发布的 Python 包安装。
 package = false
+# 锁定到 Windows + Linux，避免 macOS 在 PyTorch CPU 源上找不到 +cpu wheel
+# 导致跨平台解析失败（项目实际运行环境为 Windows 一键启动 / Linux Docker）。
+environments = ["sys_platform == 'win32'", "sys_platform == 'linux'"]
+
+# torch 的 CPU 版本只在 PyTorch 官方索引提供，单独指定来源。
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
