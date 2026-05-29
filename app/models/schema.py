@@ -89,6 +89,9 @@ class VideoParams(BaseModel):
     # stock footage is used for the full duration regardless of this flag.
     fill_with_stock: Optional[bool] = False
     stock_source: Optional[str] = "pexels"  # provider for the top-up (pexels | pixabay)
+    # Folder of local assets to use as materials. When set, every supported file
+    # in the folder is used and the folder is treated as an allowed material dir.
+    local_materials_dir: Optional[str] = ""
 
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
     video_language: Optional[str] = ""  # auto detect

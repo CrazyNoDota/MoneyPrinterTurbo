@@ -114,5 +114,38 @@ class TestMaterialTlsVerification(unittest.TestCase):
             self.assertTrue(get.call_args.kwargs["verify"])
 
 
+class TestListLocalMaterials(unittest.TestCase):
+    def test_scans_supported_files_sorted_with_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # supported media
+            for fname in ["b.mp4", "a.jpg", "c.png"]:
+                Path(temp_dir, fname).write_bytes(b"x")
+            # unsupported files are ignored
+            Path(temp_dir, "notes.txt").write_bytes(b"x")
+            Path(temp_dir, "archive.zip").write_bytes(b"x")
+
+            materials = material.list_local_materials(temp_dir, recursive=False)
+
+        names = [m.name for m in materials]
+        self.assertEqual(names, ["a.jpg", "b.mp4", "c.png"])  # sorted by path
+        self.assertTrue(all(m.provider == "local" for m in materials))
+        self.assertTrue(all(os.path.isabs(m.url) for m in materials))
+
+    def test_recursive_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sub = os.path.join(temp_dir, "sub")
+            os.makedirs(sub)
+            Path(temp_dir, "top.jpg").write_bytes(b"x")
+            Path(sub, "nested.mov").write_bytes(b"x")
+
+            materials = material.list_local_materials(temp_dir, recursive=True)
+
+        self.assertEqual({m.name for m in materials}, {"top.jpg", "nested.mov"})
+
+    def test_missing_directory_returns_empty(self):
+        self.assertEqual(material.list_local_materials("/no/such/dir"), [])
+        self.assertEqual(material.list_local_materials(""), [])
+
+
 if __name__ == "__main__":
     unittest.main()

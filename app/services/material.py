@@ -9,8 +9,50 @@ from loguru import logger
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from app.config import config
+from app.models import const
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.utils import utils
+
+# Extensions accepted when scanning a local asset folder. Superset of the
+# WebUI uploader (adds avi/flv) reusing the canonical lists in const.
+LOCAL_MATERIAL_EXTENSIONS = sorted(
+    set(const.FILE_TYPE_VIDEOS + const.FILE_TYPE_IMAGES + ["avi", "flv"])
+)
+
+
+def list_local_materials(directory: str, recursive: bool = True) -> List[MaterialInfo]:
+    """Scan a folder and return every supported photo/video as a MaterialInfo.
+
+    Files are returned sorted by path so the resulting video order is stable.
+    """
+    materials: List[MaterialInfo] = []
+    if not directory or not os.path.isdir(directory):
+        logger.warning(f"local materials folder not found: {directory}")
+        return materials
+
+    allowed = {f".{ext.lower()}" for ext in LOCAL_MATERIAL_EXTENSIONS}
+    if recursive:
+        candidates = [
+            os.path.join(root, name)
+            for root, _, files in os.walk(directory)
+            for name in files
+        ]
+    else:
+        candidates = [os.path.join(directory, name) for name in os.listdir(directory)]
+
+    for file_path in sorted(candidates):
+        if not os.path.isfile(file_path):
+            continue
+        if os.path.splitext(file_path)[1].lower() not in allowed:
+            continue
+        m = MaterialInfo()
+        m.provider = "local"
+        m.url = file_path
+        m.name = os.path.basename(file_path)
+        materials.append(m)
+
+    logger.info(f"found {len(materials)} local materials in {directory}")
+    return materials
 
 # Thread-safe counter for API key rotation
 _api_key_counter = 0

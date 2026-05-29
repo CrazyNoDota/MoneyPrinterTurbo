@@ -252,12 +252,22 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
     # Local source: use all uploaded materials first, then optionally fill the
     # remaining audio duration with stock footage. With no uploads at all, fall
     # back to stock for the full duration so a video can still be produced.
+    # 若只提供了素材文件夹（常见于 API 调用），扫描文件夹生成素材列表。
+    if not params.video_materials and params.local_materials_dir:
+        params.video_materials = material.list_local_materials(
+            params.local_materials_dir
+        )
+
     material_paths = []
     local_duration = 0.0
     if params.video_materials:
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
-            materials=params.video_materials, clip_duration=params.video_clip_duration
+            materials=params.video_materials,
+            clip_duration=params.video_clip_duration,
+            allowed_dirs=[params.local_materials_dir]
+            if params.local_materials_dir
+            else None,
         )
         for material_info in materials:
             material_paths.append(material_info.url)
@@ -353,6 +363,16 @@ def generate_final_videos(
 def start(task_id, params: VideoParams, stop_at: str = "video"):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
+
+    # 提前扫描素材文件夹，让脚本生成也能基于文件名理解素材内容。
+    if (
+        params.video_source == "local"
+        and not params.video_materials
+        and params.local_materials_dir
+    ):
+        params.video_materials = material.list_local_materials(
+            params.local_materials_dir
+        )
 
     # 1. Generate script
     video_script = generate_script(task_id, params)

@@ -89,6 +89,8 @@
     "Bilibili": "哔哩哔哩 (Bilibili 支持中，敬请期待)",
     "Xiaohongshu": "小红书 (Xiaohongshu 支持中，敬请期待)",
     "Local file": "本地文件",
+    "Or use a local assets folder": "或使用本地素材文件夹（填写包含图片/视频的文件夹路径）",
+    "Folder not found": "未找到该文件夹，请检查路径",
     "Fill remaining duration with stock footage": "用在线素材补足剩余时长（优先使用上传素材，再补充 Pexels/Pixabay）",
     "Stock Source": "在线素材来源",
     "Play Voice": "试听语音合成",

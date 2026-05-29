@@ -129,11 +129,16 @@ def concat_video_clips_with_ffmpeg(
         delete_files(concat_list_file)
 
 
-def _sanitize_image_file(image_path: str) -> str:
+def _sanitize_image_file(image_path: str, output_dir: str = None) -> str:
     # 某些本地图片虽然能被 Pillow 打开，但会因为损坏的 EXIF/eXIf 元数据导致
     # ImageClip 在解析阶段直接抛异常。这里重新导出一份“干净图片”，把坏元数据剥离掉。
-    image_root, _ = os.path.splitext(image_path)
-    sanitized_path = f"{image_root}.sanitized.png"
+    if output_dir:
+        # 当源文件在用户自选的素材目录时，把清洗副本写到缓存目录，避免污染原目录。
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        sanitized_path = os.path.join(output_dir, f"{base}.sanitized.png")
+    else:
+        image_root, _ = os.path.splitext(image_path)
+        sanitized_path = f"{image_root}.sanitized.png"
 
     with Image.open(image_path) as image:
         image.load()
@@ -145,7 +150,7 @@ def _sanitize_image_file(image_path: str) -> str:
     return sanitized_path
 
 
-def _open_image_clip_with_fallback(image_path: str):
+def _open_image_clip_with_fallback(image_path: str, output_dir: str = None):
     # 优先直接打开原始图片；如果因为损坏元数据失败，再尝试生成无元数据副本。
     try:
         return ImageClip(image_path), image_path
@@ -153,7 +158,7 @@ def _open_image_clip_with_fallback(image_path: str):
         logger.warning(
             f"failed to open image directly, trying sanitized copy: {image_path}, error: {str(exc)}"
         )
-        sanitized_path = _sanitize_image_file(image_path)
+        sanitized_path = _sanitize_image_file(image_path, output_dir=output_dir)
         return ImageClip(sanitized_path), sanitized_path
 
 
@@ -651,7 +656,7 @@ def generate_video(
     del video_clip
 
 
-def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
+def preprocess_video(materials: List[MaterialInfo], clip_duration=4, allowed_dirs=None):
     # WebUI 在某些二次生成场景下可能传入空素材列表，这里直接返回空结果，避免抛出 NoneType 异常。
     if not materials:
         return []
@@ -660,30 +665,51 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
     valid_materials = []
     local_videos_dir = utils.storage_dir("local_videos", create=True)
 
+    # 允许的素材根目录：默认上传缓存目录，外加用户自选的素材文件夹。
+    search_dirs = [os.path.realpath(local_videos_dir)]
+    for extra in allowed_dirs or []:
+        extra = (extra or "").strip()
+        if extra and os.path.isdir(extra):
+            search_dirs.append(os.path.realpath(extra))
+
     for material in materials:
         if not material.url:
             continue
 
-        try:
-            material_source_path = file_security.resolve_path_within_directory(
-                local_videos_dir, material.url
-            )
-        except ValueError as exc:
-            # local video_source 的素材路径来自 API 参数，必须限制在专用素材目录。
-            # 允许用户传文件名，也兼容历史返回的绝对路径，但不允许逃逸到系统
-            # 其他目录，避免任意文件读取或通过 MoviePy 探测本地敏感文件。
+        # 依次在各允许目录内解析素材路径，命中任意一个即视为安全。
+        material_source_path = None
+        for base_dir in search_dirs:
+            try:
+                material_source_path = file_security.resolve_path_within_directory(
+                    base_dir, material.url
+                )
+                break
+            except ValueError:
+                continue
+
+        if not material_source_path:
+            # local video_source 的素材路径来自 API 参数，必须限制在允许目录内。
+            # 允许用户传文件名/绝对路径，但不允许逃逸到其他目录，避免任意文件读取
+            # 或通过 MoviePy 探测本地敏感文件。
             logger.warning(
                 f"skip unsafe local material: {material.url}, "
-                f"local_videos_dir: {local_videos_dir}, error: {str(exc)}"
+                f"allowed_dirs: {search_dirs}"
             )
             continue
+
+        # 源文件在缓存目录之外（用户自选文件夹）时，把生成的产物写到缓存目录，
+        # 既保持安全模型，又不会在用户的素材文件夹里留下转码文件。
+        is_external = (
+            os.path.commonpath([search_dirs[0], material_source_path]) != search_dirs[0]
+        )
+        artifact_dir = local_videos_dir if is_external else None
 
         ext = utils.parse_extension(material_source_path)
         try:
             # 图片素材直接按图片方式读取，避免先走 VideoFileClip 误判后触发不稳定的回退分支。
             if ext in const.FILE_TYPE_IMAGES:
                 clip, material_source_path = _open_image_clip_with_fallback(
-                    material_source_path
+                    material_source_path, output_dir=artifact_dir
                 )
             else:
                 clip = _open_video_clip_quietly(material_source_path)
@@ -691,7 +717,7 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
             # 非标准扩展名或探测失败时再回退到图片模式，兼容历史上直接传本地图片路径的情况。
             try:
                 clip, material_source_path = _open_image_clip_with_fallback(
-                    material_source_path
+                    material_source_path, output_dir=artifact_dir
                 )
             except Exception as exc:
                 logger.warning(
@@ -730,8 +756,13 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
                 # This is useful when you want to add other elements to the video.
                 final_clip = CompositeVideoClip([zoom_clip])
 
-                # Output the video to a file.
-                video_file = f"{material_source_path}.mp4"
+                # Output the video to a file. 外部素材目录的图片转码结果写到缓存目录，
+                # 避免在用户的素材文件夹里产生 .mp4 文件。
+                if artifact_dir:
+                    image_base = os.path.basename(material_source_path)
+                    video_file = os.path.join(artifact_dir, f"{image_base}.mp4")
+                else:
+                    video_file = f"{material_source_path}.mp4"
                 final_clip.write_videofile(video_file, fps=30, logger=None)
                 close_clip(clip)
                 close_clip(final_clip)

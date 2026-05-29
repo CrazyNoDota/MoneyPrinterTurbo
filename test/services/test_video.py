@@ -123,6 +123,37 @@ class TestVideoService(unittest.TestCase):
             if os.path.exists(safe_img_path):
                 os.remove(safe_img_path)
 
+    def test_preprocess_video_accepts_external_allowed_dir(self):
+        """A user-selected assets folder is allowed when passed via allowed_dirs,
+        and image conversion artifacts go to the cache dir, not the source folder."""
+        if not os.path.exists(self.test_img_path):
+            self.fail(f"test image not found: {self.test_img_path}")
+
+        with tempfile.TemporaryDirectory() as assets_dir:
+            ext_img_path = os.path.join(assets_dir, "external-asset.png")
+            shutil.copy2(self.test_img_path, ext_img_path)
+
+            m = MaterialInfo(provider="local", url=ext_img_path)
+            materials = vd.preprocess_video(
+                [m], clip_duration=4, allowed_dirs=[assets_dir]
+            )
+
+            self.assertEqual(len(materials), 1)
+            out_path = materials[0].url
+            self.assertTrue(out_path.endswith(".mp4"))
+            # converted clip must live in the cache dir, not the user's folder
+            local_videos_dir = utils.storage_dir("local_videos", create=True)
+            self.assertEqual(
+                os.path.commonpath([os.path.realpath(local_videos_dir), out_path]),
+                os.path.realpath(local_videos_dir),
+            )
+            # the source folder should not be polluted with generated files
+            leftovers = [f for f in os.listdir(assets_dir) if f != "external-asset.png"]
+            self.assertEqual(leftovers, [])
+
+            if os.path.exists(out_path):
+                os.remove(out_path)
+
     def test_preprocess_video_rejects_material_outside_local_videos(self):
         """
         local 素材路径来自 API 参数，不能允许任意绝对路径进入 MoviePy。

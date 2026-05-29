@@ -22,7 +22,7 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import llm, voice
+from app.services import llm, material, voice
 from app.services import task as tm
 from app.utils import utils
 
@@ -69,6 +69,9 @@ if "ui_language" not in st.session_state:
 if "local_video_materials" not in st.session_state:
     # 记住用户最近一次已经落盘的本地素材，避免仅修改文案后二次生成时丢失素材列表。
     st.session_state["local_video_materials"] = []
+if "local_materials_dir" not in st.session_state:
+    # 记住用户最近一次选择的素材文件夹路径。
+    st.session_state["local_materials_dir"] = ""
 
 # 加载语言文件
 locales = utils.load_locales(i18n_dir)
@@ -540,6 +543,7 @@ right_panel = panel[2]
 params = VideoParams(video_subject="")
 uploaded_files = []
 uploaded_audio_file = None
+local_materials_dir = ""
 
 with left_panel:
     with st.container(border=True):
@@ -640,6 +644,14 @@ with middle_panel:
                 type=local_file_types + [file_type.upper() for file_type in local_file_types],
                 accept_multiple_files=True,
             )
+
+            # 也可以直接指定一个本地文件夹，使用其中所有受支持的图片/视频。
+            local_materials_dir = st.text_input(
+                tr("Or use a local assets folder"),
+                value=st.session_state.get("local_materials_dir", ""),
+            ).strip()
+            if local_materials_dir and not os.path.isdir(local_materials_dir):
+                st.warning(tr("Folder not found"))
 
             # 上传素材不足以覆盖音频时长时，可自动用 Pexels/Pixabay 素材补足。
             # 即使关闭该选项，未上传任何素材时也会自动回退到在线素材。
@@ -1132,6 +1144,10 @@ if start_button:
             f.write(uploaded_audio_file.getbuffer())
         params.custom_audio_file = custom_audio_path
 
+    # 记住本次选择的本地素材文件夹，并让后端把它当作允许的素材目录。
+    params.local_materials_dir = local_materials_dir
+    st.session_state["local_materials_dir"] = local_materials_dir
+
     if uploaded_files:
         local_videos_dir = utils.storage_dir("local_videos", create=True)
         # 每次重新上传时都以本次选择的素材为准，避免旧素材不断重复追加。
@@ -1160,13 +1176,22 @@ if start_button:
     elif params.video_source == "local" and st.session_state["local_video_materials"]:
         # 当用户没有重新上传文件时，复用最近一次已经保存到磁盘的本地素材列表。
         params.video_materials = []
-        for material in st.session_state["local_video_materials"]:
+        for material_item in st.session_state["local_video_materials"]:
             m = MaterialInfo()
-            m.provider = material.get("provider", "local")
-            m.url = material.get("url", "")
-            m.duration = material.get("duration", 0)
-            m.name = material.get("name", "")
+            m.provider = material_item.get("provider", "local")
+            m.url = material_item.get("url", "")
+            m.duration = material_item.get("duration", 0)
+            m.name = material_item.get("name", "")
             if m.url:
+                params.video_materials.append(m)
+
+    # 把素材文件夹中的所有受支持文件合并进素材列表（与上传文件一起使用）。
+    if local_materials_dir and os.path.isdir(local_materials_dir):
+        if params.video_materials is None:
+            params.video_materials = []
+        existing_urls = {m.url for m in params.video_materials}
+        for m in material.list_local_materials(local_materials_dir):
+            if m.url not in existing_urls:
                 params.video_materials.append(m)
 
     log_container = st.empty()
