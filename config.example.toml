@@ -182,6 +182,17 @@ video_gen_max_seconds = 60    # hard cap on total generated seconds per video
 video_gen_timeout = 300       # seconds to wait for a single clip before giving up
 video_gen_poll_interval = 5   # seconds between status polls
 
+########## Qwen3-TTS (local voice, isolated env)
+# A high-quality local neural TTS (more natural than Silero, supports Russian +
+# 9 other languages). Because qwen-tts has heavy/conflicting deps, it lives in a
+# separate environment (.venv-qwen) created by setup-qwen.bat and is called via a
+# subprocess. In the WebUI pick TTS Server = "Qwen3-TTS (local)".
+# Uses the NVIDIA GPU automatically when available (CPU fallback otherwise).
+qwen_tts_model = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+qwen_tts_language = "Russian"   # default language for the voice list
+qwen_tts_timeout = 1800         # max seconds for one synthesis subprocess
+# qwen_tts_python = ""          # override path to the .venv-qwen interpreter
+
 ########## Qwen API Key
 # Visit https://dashscope.console.aliyun.com/apiKey to get your API key
 # Visit below links to get more details

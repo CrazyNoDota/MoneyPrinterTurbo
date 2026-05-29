@@ -787,6 +787,7 @@ with middle_panel:
             ("siliconflow", "SiliconFlow TTS"),
             ("gemini-tts", "Google Gemini TTS"),
             ("silero", "Silero TTS (RU, local)"),
+            ("qwen", "Qwen3-TTS (local)"),
         ]
 
         # 获取保存的TTS服务器，默认为v1
@@ -819,6 +820,9 @@ with middle_panel:
         elif selected_tts_server == "silero":
             # 本地 Silero 俄语模型的声音列表
             filtered_voices = voice.get_silero_voices()
+        elif selected_tts_server == "qwen":
+            # 本地 Qwen3-TTS 模型的声音列表（通过 setup-qwen.bat 安装）
+            filtered_voices = voice.get_qwen_voices()
         else:
             # 获取Azure的声音列表
             all_voices = voice.get_all_azure_voices(filter_locals=None)

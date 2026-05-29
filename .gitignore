@@ -29,6 +29,7 @@ node_modules
 
 venv/
 .venv
+.venv-qwen/
 
 # Debug and test files
 CLAUDE.md

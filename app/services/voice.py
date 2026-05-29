@@ -130,6 +130,35 @@ def get_silero_voices() -> list[str]:
     ]
 
 
+# Qwen3-TTS-12Hz-0.6B-CustomVoice ships these 9 speakers. None are natively
+# Russian, but the model speaks Russian (and 9 other languages) with any speaker;
+# the English speakers (ryan/aiden) tend to give the cleanest Russian, so they
+# lead the list. Runs in an isolated env via subprocess (see qwen_worker.py).
+_QWEN_SPEAKERS = [
+    ("ryan", "Male"),
+    ("aiden", "Male"),
+    ("vivian", "Female"),
+    ("serena", "Female"),
+    ("sohee", "Female"),
+    ("ono_anna", "Female"),
+    ("dylan", "Male"),
+    ("eric", "Male"),
+    ("uncle_fu", "Male"),
+]
+
+
+def get_qwen_voices(language: str = None) -> list[str]:
+    """Voices for the local Qwen3-TTS model.
+
+    Names are formatted as ["qwen:Russian:ryan-Male", ...]. The language segment
+    tells the model which language to speak (default from config, ``Russian``).
+    """
+    language = language or config.app.get("qwen_tts_language", "Russian")
+    return [
+        f"qwen:{language}:{speaker}-{gender}" for speaker, gender in _QWEN_SPEAKERS
+    ]
+
+
 def get_all_azure_voices(filter_locals=None) -> list[str]:
     azure_voices_str = """
 Name: af-ZA-AdriNeural
@@ -1175,6 +1204,11 @@ def is_silero_voice(voice_name: str):
     return voice_name.startswith("silero:")
 
 
+def is_qwen_voice(voice_name: str):
+    """Whether this is a local Qwen3-TTS voice."""
+    return voice_name.startswith("qwen:")
+
+
 def tts(
     text: str,
     voice_name: str,
@@ -1222,6 +1256,16 @@ def tts(
             return silero_tts(text, model, speaker, voice_rate, voice_file, voice_volume)
         else:
             logger.error(f"Invalid silero voice name format: {voice_name}")
+            return None
+    elif is_qwen_voice(voice_name):
+        # 格式: qwen:Language:speaker-Gender, e.g. qwen:Russian:ryan-Male
+        parts = voice_name.split(":")
+        if len(parts) >= 3:
+            language = parts[1]
+            speaker = parts[2].split("-")[0]
+            return qwen_tts(text, language, speaker, voice_file, voice_rate, voice_volume)
+        else:
+            logger.error(f"Invalid qwen voice name format: {voice_name}")
             return None
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
@@ -2012,6 +2056,105 @@ def silero_tts(
     except Exception as e:
         logger.error(f"Silero TTS failed, error: {str(e)}")
         return None
+
+
+_QWEN_DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+
+
+def _qwen_python() -> str:
+    """Path to the Python interpreter of the isolated Qwen-TTS environment."""
+    override = config.app.get("qwen_tts_python")
+    if override:
+        return override
+    root = utils.root_dir()
+    if os.name == "nt":
+        return os.path.join(root, ".venv-qwen", "Scripts", "python.exe")
+    return os.path.join(root, ".venv-qwen", "bin", "python")
+
+
+def qwen_tts(
+    text: str,
+    language: str,
+    speaker: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """Synthesize speech with the local Qwen3-TTS model (no API key).
+
+    qwen-tts has heavy/conflicting dependencies, so it lives in an isolated
+    ``.venv-qwen`` (created by ``setup-qwen.bat``) and is driven via a subprocess
+    worker. ``voice_rate``/``voice_volume`` are not applied by the model;
+    subtitles fall back to the sentence-proportional timeline like the other
+    non-edge providers.
+    """
+    import subprocess
+
+    from pydub import AudioSegment
+
+    _configure_pydub_ffmpeg(AudioSegment)
+
+    py = _qwen_python()
+    if not os.path.exists(py):
+        logger.error(
+            f"Qwen TTS environment not found at {py}. "
+            "Run setup-qwen.bat once to install it (or set app.qwen_tts_python)."
+        )
+        return None
+
+    worker = os.path.join(os.path.dirname(__file__), "qwen_worker.py")
+    model = config.app.get("qwen_tts_model", _QWEN_DEFAULT_MODEL)
+    timeout = int(config.app.get("qwen_tts_timeout", 1800))
+
+    temp_dir = utils.storage_dir("temp", create=True)
+    text_file = os.path.join(temp_dir, f"qwen-{utils.md5(text)[:12]}.txt")
+    out_wav = os.path.join(temp_dir, f"qwen-{utils.md5(text)[:12]}.wav")
+    try:
+        with open(text_file, "w", encoding="utf-8") as f:
+            f.write(text)
+
+        cmd = [
+            py, worker,
+            "--text-file", text_file,
+            "--language", language,
+            "--speaker", speaker.lower(),
+            "--model", model,
+            "--out", out_wav,
+        ]
+        logger.info(f"start qwen tts (subprocess): language={language}, speaker={speaker}")
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout,
+        )
+        if proc.returncode != 0 or not os.path.exists(out_wav):
+            detail = (proc.stderr or proc.stdout or "").strip()
+            logger.error(f"Qwen TTS worker failed: {detail}")
+            return None
+
+        audio_segment = AudioSegment.from_wav(out_wav)
+        ensure_file_path_exists(voice_file)
+        audio_segment.export(voice_file, format="mp3")
+        logger.success(f"qwen tts succeeded: {voice_file}")
+
+        sub_maker = ensure_legacy_submaker_fields(SubMaker())
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=sub_maker,
+            text=text,
+            audio_duration_seconds=len(audio_segment) / 1000.0,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error(f"Qwen TTS timed out after {timeout}s")
+        return None
+    except Exception as e:
+        logger.error(f"Qwen TTS failed, error: {str(e)}")
+        return None
+    finally:
+        for path in (text_file, out_wav):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
 
 def _format_text(text: str) -> str:

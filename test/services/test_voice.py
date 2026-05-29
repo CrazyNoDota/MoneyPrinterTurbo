@@ -325,6 +325,56 @@ class TestVoiceService(unittest.TestCase):
         self.assertTrue(os.path.isfile(voice_file) and os.path.getsize(voice_file) > 0)
         self.assertTrue(getattr(sub_maker, "subs", []))
 
+    def test_qwen_voices_and_detection(self):
+        voices = vs.get_qwen_voices()
+        self.assertIn("qwen:Russian:ryan-Male", voices)
+        self.assertTrue(all(v.startswith("qwen:Russian:") for v in voices))
+        self.assertTrue(vs.is_qwen_voice("qwen:Russian:ryan-Male"))
+        self.assertFalse(vs.is_qwen_voice("silero:v5_ru:baya-Female"))
+
+    def test_qwen_tts_via_dispatch_uses_subprocess_and_legacy_submaker(self):
+        """tts() routes qwen: voices to the isolated subprocess worker, parses
+        language/speaker, transcodes the wav, and returns a legacy SubMaker."""
+        import subprocess
+        import sys
+        import wave
+        from types import SimpleNamespace
+
+        from app.config import config
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["speaker"] = cmd[cmd.index("--speaker") + 1]
+            captured["language"] = cmd[cmd.index("--language") + 1]
+            out = cmd[cmd.index("--out") + 1]
+            with wave.open(out, "wb") as w:  # 0.5s of silence, 24kHz mono PCM
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(b"\x00\x00" * 12000)
+            return SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+
+        # point at a real interpreter so the env-exists check passes
+        config.app["qwen_tts_python"] = sys.executable
+        voice_file = f"{temp_dir}/tts-qwen-ryan.mp3"
+        try:
+            with patch.object(subprocess, "run", side_effect=fake_run):
+                sub_maker = vs.tts(
+                    text="Привет! Это тест Qwen.",
+                    voice_name="qwen:Russian:ryan-Male",
+                    voice_rate=1.0,
+                    voice_file=voice_file,
+                )
+        finally:
+            config.app.pop("qwen_tts_python", None)
+
+        self.assertIsNotNone(sub_maker)
+        self.assertEqual(captured["speaker"], "ryan")
+        self.assertEqual(captured["language"], "Russian")
+        self.assertTrue(os.path.isfile(voice_file) and os.path.getsize(voice_file) > 0)
+        self.assertTrue(getattr(sub_maker, "subs", []))
+
     def test_generate_subtitle_keeps_edge_provider_for_gemini_legacy_submaker(self):
         """
         验证 Gemini TTS 返回的 legacy 字幕结构在 edge provider 下可以直接产出

@@ -1,0 +1,12 @@
+# Isolated dependencies for the local Qwen3-TTS voice (installed into .venv-qwen
+# by setup-qwen.bat, NOT into the main app environment).
+#
+# These are kept separate on purpose: qwen-tts pulls in gradio (which upgrades
+# FastAPI/Starlette) and a pinned transformers, which would conflict with the
+# main app's pinned stack. The main app talks to this env only via a subprocess
+# (app/services/qwen_worker.py).
+#
+# torch + torchaudio are installed first by setup-qwen.bat from the appropriate
+# PyTorch index (CUDA build when an NVIDIA GPU is present, else CPU), so they are
+# intentionally not pinned here.
+qwen-tts==0.1.1
