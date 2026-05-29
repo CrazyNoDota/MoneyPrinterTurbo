@@ -117,6 +117,9 @@ class VideoParams(BaseModel):
 
     subtitle_enabled: Optional[bool] = True
     subtitle_position: Optional[str] = config.ui.get("subtitle_position", "bottom")  # top, bottom, center, custom
+    # Caption look: "outline" (clean, no box, thick outline - default),
+    # "shadow" (outline + soft drop shadow), or "box" (legacy background box).
+    subtitle_style: Optional[str] = config.ui.get("subtitle_style", "outline")
     custom_position: float = config.ui.get("custom_position", 70.0)
     font_name: Optional[str] = "STHeitiMedium.ttc"
     text_fore_color: Optional[str] = "#FFFFFF"

@@ -1057,6 +1057,26 @@ with right_panel:
         params.subtitle_position = subtitle_positions[selected_index][1]
         config.ui["subtitle_position"] = params.subtitle_position
 
+        subtitle_styles = [
+            (tr("Outline (clean)"), "outline"),
+            (tr("Drop Shadow"), "shadow"),
+            (tr("Background Box"), "box"),
+        ]
+        saved_subtitle_style = config.ui.get("subtitle_style", "outline")
+        saved_style_index = 0
+        for i, (_, style_value) in enumerate(subtitle_styles):
+            if style_value == saved_subtitle_style:
+                saved_style_index = i
+                break
+        selected_style_index = st.selectbox(
+            tr("Caption Style"),
+            index=saved_style_index,
+            options=range(len(subtitle_styles)),
+            format_func=lambda x: subtitle_styles[x][0],
+        )
+        params.subtitle_style = subtitle_styles[selected_style_index][1]
+        config.ui["subtitle_style"] = params.subtitle_style
+
         if params.subtitle_position == "custom":
             saved_custom_position = config.ui.get("custom_position", 70.0)
             custom_position = st.text_input(

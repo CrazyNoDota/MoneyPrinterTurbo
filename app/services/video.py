@@ -548,17 +548,27 @@ def generate_video(
             return "#000000" if params.text_background_color else None
         return params.text_background_color
 
-    def create_text_clip(subtitle_item):
-        params.font_size = int(params.font_size)
-        params.stroke_width = int(params.stroke_width)
+    # Subtitle look:
+    #   outline -> no box, thick outline (clean modern "shorts" caption; default)
+    #   shadow  -> outline + a soft drop shadow for extra pop
+    #   box     -> the legacy solid background box (uses text_background_color)
+    subtitle_style = (getattr(params, "subtitle_style", "") or "outline").strip().lower()
+
+    def create_text_clips(subtitle_item):
+        """Return the positioned clip(s) for one subtitle line.
+
+        Returns a list because the ``shadow`` style stacks a shadow clip behind
+        the text.
+        """
+        font_size = int(params.font_size)
         phrase = subtitle_item[1]
         max_width = video_width * 0.9
         wrapped_txt, txt_height = wrap_text(
-            phrase, max_width=max_width, font=font_path, fontsize=params.font_size
+            phrase, max_width=max_width, font=font_path, fontsize=font_size
         )
-        interline = int(params.font_size * 0.25)
+        interline = int(font_size * 0.25)
         line_count = wrapped_txt.count("\n") + 1
-        vertical_padding = int(params.font_size * 0.35)
+        vertical_padding = int(font_size * 0.35)
         # MoviePy 在 `method=label` 下会自动收缩文本框高度，遇到多行字幕、
         # 描边或背景色时，容易把最后一行的下半部分裁掉。这里显式传入
         # 一个更保守的高度，把行间距和额外上下留白一并算进去，保证字幕
@@ -568,39 +578,73 @@ def generate_video(
             int(txt_height + vertical_padding + (interline * line_count)),
         )
 
-        _clip = TextClip(
+        # Only the legacy "box" style draws a background rectangle. Without a box
+        # the text needs a strong outline to stay legible over any footage, so we
+        # honor a larger user-set stroke but enforce a sensible minimum.
+        provided_stroke = int(params.stroke_width)
+        if subtitle_style == "box":
+            bg_color = resolve_subtitle_background_color()
+            stroke_width = provided_stroke
+        else:
+            bg_color = None
+            stroke_width = max(provided_stroke, max(2, round(font_size * 0.05)))
+
+        common = dict(
             text=wrapped_txt,
             font=font_path,
-            font_size=params.font_size,
-            color=params.text_fore_color,
-            bg_color=resolve_subtitle_background_color(),
-            stroke_color=params.stroke_color,
-            stroke_width=params.stroke_width,
+            font_size=font_size,
             interline=interline,
             size=size,
             text_align="center",
         )
-        duration = subtitle_item[0][1] - subtitle_item[0][0]
-        _clip = _clip.with_start(subtitle_item[0][0])
-        _clip = _clip.with_end(subtitle_item[0][1])
-        _clip = _clip.with_duration(duration)
+
+        main_clip = TextClip(
+            color=params.text_fore_color,
+            bg_color=bg_color,
+            stroke_color=params.stroke_color,
+            stroke_width=stroke_width,
+            **common,
+        )
+
+        start, end = subtitle_item[0][0], subtitle_item[0][1]
+        duration = end - start
+        clip_h, clip_w = main_clip.h, main_clip.w
+
         if params.subtitle_position == "bottom":
-            _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
+            y = video_height * 0.95 - clip_h
         elif params.subtitle_position == "top":
-            _clip = _clip.with_position(("center", video_height * 0.05))
+            y = video_height * 0.05
         elif params.subtitle_position == "custom":
-            # Ensure the subtitle is fully within the screen bounds
             margin = 10  # Additional margin, in pixels
-            max_y = video_height - _clip.h - margin
+            max_y = video_height - clip_h - margin
             min_y = margin
-            custom_y = (video_height - _clip.h) * (params.custom_position / 100)
-            custom_y = max(
-                min_y, min(custom_y, max_y)
-            )  # Constrain the y value within the valid range
-            _clip = _clip.with_position(("center", custom_y))
+            y = (video_height - clip_h) * (params.custom_position / 100)
+            y = max(min_y, min(y, max_y))  # constrain within screen bounds
         else:  # center
-            _clip = _clip.with_position(("center", "center"))
-        return _clip
+            y = (video_height - clip_h) / 2
+        x = (video_width - clip_w) / 2
+
+        def _timed(clip, pos):
+            return (
+                clip.with_start(start)
+                .with_end(end)
+                .with_duration(duration)
+                .with_position(pos)
+            )
+
+        clips = []
+        if subtitle_style == "shadow":
+            offset = max(2, round(font_size * 0.06))
+            shadow_clip = TextClip(
+                color="#000000",
+                bg_color=None,
+                stroke_color="#000000",
+                stroke_width=stroke_width,
+                **common,
+            )
+            clips.append(_timed(shadow_clip, (x + offset, y + offset)))
+        clips.append(_timed(main_clip, (x, y)))
+        return clips
 
     video_clip = _open_video_clip_quietly(video_path)
     audio_clip = AudioFileClip(audio_path).with_effects(
@@ -620,8 +664,7 @@ def generate_video(
         )
         text_clips = []
         for item in sub.subtitles:
-            clip = create_text_clip(subtitle_item=item)
-            text_clips.append(clip)
+            text_clips.extend(create_text_clips(subtitle_item=item))
         video_clip = CompositeVideoClip([video_clip, *text_clips])
 
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)

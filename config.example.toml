@@ -353,6 +353,13 @@ hide_log = false
 # Custom position as percentage from top (0-100), only effective when subtitle_position = "custom"
 # custom_position = 70.0
 
+# 字幕样式 (Caption style):
+#   "outline" -> 干净的描边文字，无背景框（默认，类似短视频字幕）
+#                clean outlined text, no box (default; modern shorts look)
+#   "shadow"  -> 描边 + 投影 (outline + soft drop shadow)
+#   "box"     -> 传统纯色背景框 (legacy solid background box)
+# subtitle_style = "outline"
+
 ########## Upload-Post (Cross-post to TikTok/Instagram)
 # Upload-Post allows you to automatically cross-post generated videos to TikTok and Instagram.
 # Visit https://upload-post.com to create an account and get your API key.
