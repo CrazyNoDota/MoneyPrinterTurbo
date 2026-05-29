@@ -44,7 +44,7 @@ pixabay_api_keys = []
 #   ernie       (文心一言)
 #   modelscope  (魔搭社区)
 #   litellm     (100+ providers via LiteLLM gateway)
-llm_provider = "openai"
+llm_provider = "nvidia"
 
 ########## Pollinations AI Settings
 # Visit https://pollinations.ai/ to learn more
@@ -112,6 +112,12 @@ gemini_model_name = "gemini-2.5-flash"
 grok_api_key = ""
 grok_model_name = "grok-4.3"
 grok_base_url = "https://api.x.ai/v1"
+
+########## NVIDIA NIM API Key
+# Visit https://build.nvidia.com to get your API key (starts with nvapi-)
+nvidia_api_key = ""
+nvidia_base_url = "https://integrate.api.nvidia.com/v1"
+nvidia_model_name = "stepfun-ai/step-3.7-flash"
 
 ########## Qwen API Key
 # Visit https://dashscope.console.aliyun.com/apiKey to get your API key

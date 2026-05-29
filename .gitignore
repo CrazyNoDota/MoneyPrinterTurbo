@@ -1,5 +1,8 @@
 .DS_Store
 /config.toml
+# Secrets live here, never commit (the template .env.example is committed)
+/.env
+.uv/
 /storage/
 /.idea/
 /app/services/__pycache__
