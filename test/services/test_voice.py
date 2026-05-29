@@ -287,6 +287,44 @@ class TestVoiceService(unittest.TestCase):
         self.assertIn("Gemini subtitle generation should work now", subtitle_content)
         self.assertIn("Testing multiple lines", subtitle_content)
 
+    def test_silero_voices_and_detection(self):
+        voices = vs.get_silero_voices()
+        self.assertIn("silero:v5_ru:baya-Female", voices)
+        self.assertTrue(all(v.startswith("silero:v5_ru:") for v in voices))
+        self.assertTrue(vs.is_silero_voice("silero:v5_ru:baya-Female"))
+        self.assertFalse(vs.is_silero_voice("zh-CN-XiaoxiaoNeural-Female"))
+
+    def test_silero_tts_via_dispatch_uses_legacy_submaker(self):
+        """tts() should route silero: voices to silero_tts, parse the speaker,
+        and return a legacy SubMaker -- all without needing torch installed."""
+        import numpy as np
+
+        captured = {}
+
+        class _FakeSileroModel:
+            def apply_tts(self, text, speaker, sample_rate, **kwargs):
+                captured["speaker"] = speaker
+                captured["sample_rate"] = sample_rate
+                # 0.5s of silence as a float32 waveform in [-1, 1]
+                return np.zeros(int(sample_rate * 0.5), dtype="float32")
+
+        voice_file = f"{temp_dir}/tts-silero-baya.mp3"
+        text = "Деньги любят счёт. Это тест Silero."
+
+        with patch.object(vs, "_load_silero_model", return_value=_FakeSileroModel()):
+            sub_maker = vs.tts(
+                text=text,
+                voice_name="silero:v5_ru:baya-Female",
+                voice_rate=1.0,
+                voice_file=voice_file,
+            )
+
+        self.assertIsNotNone(sub_maker)
+        self.assertEqual(captured["speaker"], "baya")
+        self.assertEqual(captured["sample_rate"], vs._SILERO_SAMPLE_RATE)
+        self.assertTrue(os.path.isfile(voice_file) and os.path.getsize(voice_file) > 0)
+        self.assertTrue(getattr(sub_maker, "subs", []))
+
     def test_generate_subtitle_keeps_edge_provider_for_gemini_legacy_submaker(self):
         """
         验证 Gemini TTS 返回的 legacy 字幕结构在 edge provider 下可以直接产出

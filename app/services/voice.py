@@ -111,6 +111,25 @@ def get_gemini_voices() -> list[str]:
     ]
 
 
+def get_silero_voices() -> list[str]:
+    """Voices for the local Silero v5 Russian TTS model.
+
+    Returns names formatted as ["silero:v5_ru:baya-Female", ...]. Silero runs
+    locally via PyTorch (no API key), so this list is static.
+    """
+    # Speakers shipped with the v5_ru model.
+    voices_with_gender = [
+        ("baya", "Female"),
+        ("kseniya", "Female"),
+        ("xenia", "Female"),
+        ("aidar", "Male"),
+        ("eugene", "Male"),
+    ]
+    return [
+        f"silero:v5_ru:{voice}-{gender}" for voice, gender in voices_with_gender
+    ]
+
+
 def get_all_azure_voices(filter_locals=None) -> list[str]:
     azure_voices_str = """
 Name: af-ZA-AdriNeural
@@ -1151,6 +1170,11 @@ def is_gemini_voice(voice_name: str):
     return voice_name.startswith("gemini:")
 
 
+def is_silero_voice(voice_name: str):
+    """Whether this is a local Silero TTS voice."""
+    return voice_name.startswith("silero:")
+
+
 def tts(
     text: str,
     voice_name: str,
@@ -1188,6 +1212,16 @@ def tts(
             return gemini_tts(text, voice, voice_rate, voice_file, voice_volume)
         else:
             logger.error(f"Invalid gemini voice name format: {voice_name}")
+            return None
+    elif is_silero_voice(voice_name):
+        # 格式: silero:model:speaker-Gender, e.g. silero:v5_ru:baya-Female
+        parts = voice_name.split(":")
+        if len(parts) >= 3:
+            model = parts[1]
+            speaker = parts[2].split("-")[0]
+            return silero_tts(text, model, speaker, voice_rate, voice_file, voice_volume)
+        else:
+            logger.error(f"Invalid silero voice name format: {voice_name}")
             return None
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 
@@ -1868,6 +1902,115 @@ def gemini_tts(
         return None
     except Exception as e:
         logger.error(f"Gemini TTS failed, error: {str(e)}")
+        return None
+
+
+# Silero ships each language pack as a single torch package; v5 Russian lives here.
+_SILERO_MODEL_URLS = {
+    "v5_ru": "https://models.silero.ai/models/tts/ru/v5_ru.pt",
+}
+_SILERO_SAMPLE_RATE = 48000
+# Loaded models are cached per name so the ~140MB package is read from disk once.
+_silero_models: dict = {}
+# Silero is an optional local model; torch/scipy/numpy aren't base dependencies.
+_SILERO_INSTALL_HINT = (
+    "Install with: pip install torch numpy scipy "
+    "--index-url https://download.pytorch.org/whl/cpu "
+    "(scipy/numpy from the default index)"
+)
+
+
+def _load_silero_model(model_name: str):
+    """Download (once) and load a Silero TTS model package; cache in-process."""
+    if model_name in _silero_models:
+        return _silero_models[model_name]
+
+    import torch  # heavy/optional dependency: imported only when Silero is used
+
+    url = _SILERO_MODEL_URLS.get(model_name)
+    if not url:
+        raise ValueError(f"unknown silero model: {model_name}")
+
+    models_dir = utils.storage_dir(os.path.join("models", "silero"), create=True)
+    model_path = os.path.join(models_dir, f"{model_name}.pt")
+    if not os.path.exists(model_path) or os.path.getsize(model_path) == 0:
+        logger.info(f"downloading silero model {model_name} -> {model_path}")
+        torch.hub.download_url_to_file(url, model_path)
+
+    device = torch.device("cpu")
+    model = torch.package.PackageImporter(model_path).load_pickle("tts_models", "model")
+    model.to(device)
+    _silero_models[model_name] = model
+    return model
+
+
+def silero_tts(
+    text: str,
+    model_name: str,
+    speaker: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """Synthesize speech locally with the Silero v5 model (no API key).
+
+    Russian-only (v5_ru). ``voice_rate``/``voice_volume`` are not applied by the
+    model; subtitles fall back to the sentence-proportional timeline like the
+    other non-edge providers.
+    """
+    import io
+
+    from pydub import AudioSegment
+
+    _configure_pydub_ffmpeg(AudioSegment)
+
+    try:
+        import numpy as np
+    except ImportError as e:
+        logger.error(f"Missing dependency for Silero TTS: {e}. {_SILERO_INSTALL_HINT}")
+        return None
+
+    try:
+        model = _load_silero_model(model_name)
+    except ImportError as e:
+        # torch (and scipy, pulled in by the model package) are optional deps.
+        logger.error(f"Silero TTS is missing a dependency: {e}. {_SILERO_INSTALL_HINT}")
+        return None
+    except Exception as e:
+        logger.error(f"failed to load silero model {model_name}: {e}")
+        return None
+
+    try:
+        logger.info(f"start silero tts, model: {model_name}, speaker: {speaker}")
+        # Silero reads accents from text; enable automatic accent/yo placement.
+        audio = model.apply_tts(
+            text=text,
+            speaker=speaker,
+            sample_rate=_SILERO_SAMPLE_RATE,
+            put_accent=True,
+            put_yo=True,
+        )
+        # apply_tts returns a float32 tensor in [-1, 1]; convert to 16-bit PCM.
+        samples = (np.asarray(audio) * 32767).astype("int16")
+        audio_segment = AudioSegment(
+            samples.tobytes(),
+            frame_rate=_SILERO_SAMPLE_RATE,
+            sample_width=2,
+            channels=1,
+        )
+        ensure_file_path_exists(voice_file)
+        audio_segment.export(voice_file, format="mp3")
+        logger.success(f"silero tts succeeded: {voice_file}")
+
+        sub_maker = ensure_legacy_submaker_fields(SubMaker())
+        audio_duration = len(audio_segment) / 1000.0
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=sub_maker,
+            text=text,
+            audio_duration_seconds=audio_duration,
+        )
+    except Exception as e:
+        logger.error(f"Silero TTS failed, error: {str(e)}")
         return None
 
 
