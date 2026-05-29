@@ -465,7 +465,10 @@ def _generate_response(prompt: str) -> str:
 
 
 def generate_script(
-    video_subject: str, language: str = "", paragraph_number: int = 1
+    video_subject: str,
+    language: str = "",
+    paragraph_number: int = 1,
+    material_names: List[str] = None,
 ) -> str:
     prompt = f"""
 # Role: Video Script Generator
@@ -489,6 +492,17 @@ Generate a script for a video, depending on the subject of the video.
 """.strip()
     if language:
         prompt += f"\n- language: {language}"
+    if material_names:
+        media_list = "\n".join(f"  - {name}" for name in material_names)
+        prompt += (
+            "\n\n## Provided Media:\n"
+            "The video is assembled from the following user-provided photos/videos, "
+            "described by their file names. Infer what they show and write a script "
+            "that narrates and connects these visuals into a coherent story. "
+            "If a video subject is given above, stay consistent with it; otherwise let "
+            "these files drive the topic.\n"
+            f"{media_list}"
+        )
 
     final_script = ""
     logger.info(f"subject: {video_subject}")

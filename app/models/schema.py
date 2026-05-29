@@ -53,6 +53,7 @@ class MaterialInfo:
     provider: str = "pexels"
     url: str = ""
     duration: int = 0
+    name: str = ""  # original file name, used as a content hint for the LLM
 
 
 class VideoParams(BaseModel):

@@ -1144,12 +1144,15 @@ if start_button:
                 m = MaterialInfo()
                 m.provider = "local"
                 m.url = file_path
+                # keep the original file name as a content hint for the LLM script
+                m.name = file.name
                 params.video_materials.append(m)
                 persisted_local_materials.append(
                     {
                         "provider": m.provider,
                         "url": m.url,
                         "duration": m.duration,
+                        "name": m.name,
                     }
                 )
         # 将已上传并保存到本地的视频素材写入会话，供后续只改文案时直接复用。
@@ -1162,6 +1165,7 @@ if start_button:
             m.provider = material.get("provider", "local")
             m.url = material.get("url", "")
             m.duration = material.get("duration", 0)
+            m.name = material.get("name", "")
             if m.url:
                 params.video_materials.append(m)
 

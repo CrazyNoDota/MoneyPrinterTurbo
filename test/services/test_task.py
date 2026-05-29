@@ -139,5 +139,46 @@ class TestGetVideoMaterials(unittest.TestCase):
         self.assertEqual(dl.call_args.kwargs["source"], "pexels")
 
 
+class TestMaterialKeywords(unittest.TestCase):
+    """Derive LLM content hints from uploaded file names."""
+
+    def test_uses_name_field_and_normalizes(self):
+        materials = [
+            MaterialInfo(provider="local", url="/x/abc.mp4", name="Sunset_Over-The.Sea.mp4"),
+        ]
+        self.assertEqual(tm.get_material_keywords(materials), ["Sunset Over The Sea"])
+
+    def test_strips_streamlit_file_id_prefix_from_url(self):
+        url = "/storage/local_videos/123e4567-e89b-12d3-a456-426614174000_my_cat.jpg"
+        materials = [MaterialInfo(provider="local", url=url)]
+        self.assertEqual(tm.get_material_keywords(materials), ["my cat"])
+
+    def test_dedupes_case_insensitively(self):
+        materials = [
+            MaterialInfo(provider="local", url="/a.mp4", name="Beach.mp4"),
+            MaterialInfo(provider="local", url="/b.mp4", name="beach.mp4"),
+        ]
+        self.assertEqual(tm.get_material_keywords(materials), ["Beach"])
+
+    def test_empty_and_none(self):
+        self.assertEqual(tm.get_material_keywords(None), [])
+        self.assertEqual(tm.get_material_keywords([]), [])
+
+    def test_generate_script_passes_hints_to_llm(self):
+        params = VideoParams(
+            video_subject="cats",
+            video_script="",
+            video_materials=[
+                MaterialInfo(provider="local", url="/a.mp4", name="fluffy_cat.mp4"),
+            ],
+        )
+        with mock.patch.object(
+            tm.llm, "generate_script", return_value="a script"
+        ) as gen:
+            result = tm.generate_script("tid", params)
+        self.assertEqual(result, "a script")
+        self.assertEqual(gen.call_args.kwargs["material_names"], ["fluffy cat"])
+
+
 if __name__ == "__main__":
     unittest.main()
