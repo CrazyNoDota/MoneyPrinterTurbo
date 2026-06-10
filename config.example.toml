@@ -227,6 +227,18 @@ news_presenter_scale = 0.38            # presenter width as a fraction of frame 
 news_presenter_position = "bottom-right"  # bottom-right | bottom-left | top-right | top-left
 news_presenter_margin = 0.04           # corner inset as a fraction of frame width
 
+########## News sources (for the news-video pipeline)
+# news.latest() walks these in priority order and uses the first source that
+# yields items: Threads profiles first (scraped from the public profile page --
+# fragile by nature), then RSS feeds (stable fallback). Everything degrades to
+# an empty list, never crashes the pipeline.
+news_threads_profiles = []             # e.g. ["bbcnews", "rbc_ru"] (usernames, no @)
+news_rss_feeds = [
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    # RU examples: "https://lenta.ru/rss/news", "https://www.vedomosti.ru/rss/news"
+]
+news_fetch_timeout = 15                # seconds per HTTP request
+
 ########## Language switch (RU/EN voices)
 # When a task's video_language is Russian or English (any tag form: "ru",
 # "ru-RU", "en-US", ...), the pipeline picks the TTS voice automatically and

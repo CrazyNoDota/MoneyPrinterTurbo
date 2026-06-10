@@ -568,6 +568,74 @@ Generate a script for a video, depending on the subject of the video.
     return final_script.strip()
 
 
+def generate_news_script(
+    news_item,
+    language: str = "",
+    paragraph_number: int = 1,
+) -> str:
+    """Turn one news item into a narration script for a short news video.
+
+    ``news_item`` is any object with title/text/url/source/published attributes
+    (duck-typed to avoid importing app.services.news here). Returns "" when the
+    item has no usable content or the LLM keeps failing -- callers fall back to
+    the regular subject-driven script path.
+    """
+    # title/text are untrusted web content (scraped posts/feeds) interpolated
+    # into the prompt; the constraints below pin the model to fact extraction,
+    # but treat the output as a script draft, not as instructions followed.
+    title = (getattr(news_item, "title", "") or "").strip()
+    text = (getattr(news_item, "text", "") or "").strip()
+    if not title and not text:
+        logger.warning("news item has no title/text; cannot build a script")
+        return ""
+
+    prompt = f"""
+# Role: News Video Script Writer
+
+## Goals:
+Write the narration script for a short vertical news video based on the news item below.
+
+## Constrains:
+1. open with a strong one-sentence hook stating the news itself, then the key facts; no greetings or channel intros.
+2. neutral news-anchor tone: factual, concise, present tense; do not editorialize or speculate beyond the provided item.
+3. only use facts contained in the news item; if a detail is missing, leave it out rather than inventing it.
+4. the script is to be returned as a string with the specified number of paragraphs.
+5. you must not include any type of markdown or formatting in the script, never use a title.
+6. do not include "voiceover", "narrator" or similar indicators of what should be spoken.
+7. only return the raw content of the script; never mention this prompt.
+
+## News Item:
+- title: {title}
+- content: {text}
+""".strip()
+    published = (getattr(news_item, "published", "") or "").strip()
+    if published:
+        prompt += f"\n- published: {published}"
+    prompt += f"\n\n# Initialization:\n- number of paragraphs: {paragraph_number}"
+    if language:
+        prompt += f"\n- language: {language} (write the script in this language regardless of the item's language)"
+
+    final_script = ""
+    logger.info(f"news script for: {title or text[:80]}")
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt=prompt)
+            if response and "Error: " not in response:
+                final_script = response.replace("*", "").replace("#", "").strip()
+            if final_script:
+                break
+        except Exception as e:
+            logger.error(f"failed to generate news script: {e}")
+        if i < _max_retries - 1:
+            logger.warning(f"failed to generate news script, trying again... {i + 1}")
+            _backoff_sleep(i)
+    if final_script:
+        logger.success(f"completed: \n{final_script}")
+    else:
+        logger.error("failed to generate news script")
+    return final_script
+
+
 def generate_terms(
     video_subject: str,
     video_script: str,
