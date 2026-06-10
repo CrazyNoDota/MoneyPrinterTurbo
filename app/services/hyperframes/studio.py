@@ -115,6 +115,11 @@ def _extract_hero(text: str):
                    and 1900 <= number <= 2099)
         if is_year:
             continue
+        # A bare small integer ("Дешёвые ракеты 2", "шаг 3") reads as an
+        # enumeration fragment, not a headline stat -- don't blow it up to
+        # 26vw. With a currency/percent/magnitude marker any size qualifies.
+        if not prefix and not suffix and number < 10:
+            continue
         score = number
         if is_pct:
             score += 1e6        # percentages are the strongest stat signal

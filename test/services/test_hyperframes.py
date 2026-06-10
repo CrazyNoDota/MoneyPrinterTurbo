@@ -347,6 +347,13 @@ class TestStudio(unittest.TestCase):
     def test_extract_hero_ignores_bare_years(self):
         self.assertIsNone(studio._extract_hero("between 2019 and 2023"))
 
+    def test_extract_hero_ignores_bare_small_integers(self):
+        # An enumeration fragment must not become a giant stat card...
+        self.assertIsNone(studio._extract_hero("Дешёвые ракеты 2"))
+        # ...but a marked small number is still a headline stat.
+        self.assertIsNotNone(studio._extract_hero("just 2% of users"))
+        self.assertIsNotNone(studio._extract_hero("worth $2.4B today"))
+
     def test_extract_hero_currency_and_magnitude(self):
         hero = studio._extract_hero("worth $2.4B today")
         value, number, prefix, suffix, decimals, _ = hero
