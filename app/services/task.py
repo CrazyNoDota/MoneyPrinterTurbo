@@ -535,10 +535,36 @@ def _gather_base_materials(task_id, params, video_terms, audio_duration):
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path, prebuilt_video=None
+    task_id, params, downloaded_videos, audio_file, subtitle_path, prebuilt_video=None,
+    subtitle_ranges=None,
 ):
     final_video_paths = []
     combined_video_paths = []
+
+    # When hyperframes produced the visual track, the narration is already on
+    # screen as kinetic typography. Burning the .srt captions on top of those
+    # scenes would stack a second text layer over the first (the "0%" counter
+    # colliding with the big caption). So:
+    #   - solely mode (subtitle_ranges is None): every scene bakes its own text =>
+    #     skip burned captions entirely.
+    #   - mixed mode (subtitle_ranges is a list): footage scenes have no text =>
+    #     burn captions ONLY over those (start, end) ranges; motion-graphics scenes
+    #     stay clean.
+    # `hyperframes_burn_subtitles` forces the old behaviour (burn everything).
+    burn_subtitle_path = subtitle_path
+    burn_ranges = None
+    if prebuilt_video and not config.app.get("hyperframes_burn_subtitles", False):
+        if subtitle_ranges is None:
+            logger.info(
+                "hyperframes track already renders captions; skipping burned .srt overlay"
+            )
+            burn_subtitle_path = ""
+        else:
+            logger.info(
+                f"hyperframes mixed: burning captions only over {len(subtitle_ranges)} "
+                "footage scene(s); motion-graphics scenes keep their baked text"
+            )
+            burn_ranges = subtitle_ranges
     video_concat_mode = (
         params.video_concat_mode if params.video_count == 1 else VideoConcatMode.random
     )
@@ -577,9 +603,10 @@ def generate_final_videos(
         video.generate_video(
             video_path=combined_video_path,
             audio_path=audio_file,
-            subtitle_path=subtitle_path,
+            subtitle_path=burn_subtitle_path,
             output_file=final_video_path,
             params=params,
+            subtitle_ranges=burn_ranges,
         )
 
         _progress += 50 / params.video_count / 2
@@ -716,11 +743,14 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     # track timed to the narration instead of gathering stock/local footage; if it
     # produces nothing (toolchain missing / authoring failed), fall back to stock.
     hf_video = ""
+    # None => solely mode (suppress all burned captions); a list => mixed mode
+    # (caption only the footage scenes whose ranges these are).
+    hf_footage_ranges = None
     hf_mode = hyperframes.mode(params)
     if hf_mode == "mixed":
         # Director: LLM tags each scene footage vs motion-graphics; footage stays
         # native, MG scenes are rendered, and the segments are stitched in order.
-        hf_video = hyperframes.render_directed_video(
+        hf_video, hf_footage_ranges = hyperframes.render_directed_video(
             task_id, params, video_script, audio_file, subtitle_path, audio_duration,
             video_terms=video_terms, material_hints=material_hints,
         )
@@ -768,6 +798,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     final_video_paths, combined_video_paths = generate_final_videos(
         task_id, params, downloaded_videos, audio_file, subtitle_path,
         prebuilt_video=hf_video or None,
+        subtitle_ranges=hf_footage_ranges if hf_video else None,
     )
 
     if not final_video_paths:

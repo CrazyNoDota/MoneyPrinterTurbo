@@ -401,17 +401,33 @@ def save_image(image_url: str, save_dir: str = "") -> str:
     return ""
 
 
+def _image_too_small(image_path: str, min_dimension) -> bool:
+    """True if the image is below ``min_dimension`` (w, h) -- would look blurry."""
+    if not min_dimension:
+        return False
+    min_w, min_h = min_dimension
+    try:
+        with Image.open(image_path) as im:
+            w, h = im.size
+    except Exception:  # noqa: BLE001 - unreadable handled elsewhere
+        return False
+    return w < min_w or h < min_h
+
+
 def download_images(
     search_terms: List[str],
     source: str = "pexels",
     video_aspect: VideoAspect = VideoAspect.portrait,
     count: int = 1,
     save_dir: str = "",
+    min_dimension=None,
 ) -> List[str]:
     """Search + download up to ``count`` photos across ``search_terms``.
 
     Returns local file paths (deduplicated). Best-effort: returns whatever it
-    could fetch, possibly empty.
+    could fetch, possibly empty. When ``min_dimension`` (w, h) is given, photos
+    smaller than that are discarded (they would upscale to a blurry full-bleed
+    background) and the next candidate is tried instead.
     """
     seen_urls = set()
     paths: List[str] = []
@@ -428,6 +444,13 @@ def download_images(
                 local = save_image(item.url, save_dir=save_dir)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"failed to download image {item.url}: {e}")
+                continue
+            if local and _image_too_small(local, min_dimension):
+                logger.debug(f"skip low-res image for '{term}': {item.url}")
+                try:
+                    os.remove(local)
+                except Exception:  # noqa: BLE001
+                    pass
                 continue
             if local:
                 paths.append(local)

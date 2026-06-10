@@ -9,11 +9,12 @@ sources are real clips (subclipped/looped to the scene length) or stock photos
 
 import math
 import os
+import hashlib
 from dataclasses import dataclass
 from typing import List, Optional
 
 from loguru import logger
-from moviepy import CompositeVideoClip, ImageClip, concatenate_videoclips
+from moviepy import CompositeVideoClip, ImageClip, concatenate_videoclips, vfx
 
 from app.models import const
 from app.services import video
@@ -40,6 +41,64 @@ def _write(clip, out_path: str, threads: int) -> str:
     return out_path
 
 
+def _cover_to_aspect(clip, width: int, height: int):
+    """Resize and crop to fill the frame, avoiding publish-time letterboxing."""
+    clip_w, clip_h = clip.size
+    scale = max(width / clip_w, height / clip_h)
+    resized = clip.resized(new_size=(math.ceil(clip_w * scale), math.ceil(clip_h * scale)))
+    return resized.cropped(
+        x_center=resized.w / 2,
+        y_center=resized.h / 2,
+        width=width,
+        height=height,
+    )
+
+
+def _motion_direction(source_path: str) -> tuple:
+    digest = hashlib.md5((source_path or "").encode("utf-8")).hexdigest()
+    mode = int(digest[:2], 16) % 4
+    return {
+        0: (0.0, 1.0, 0.0, 1.0),
+        1: (1.0, 0.0, 1.0, 0.0),
+        2: (0.0, 1.0, 1.0, 0.0),
+        3: (1.0, 0.0, 0.0, 1.0),
+    }[mode]
+
+
+def _add_camera_motion(clip, width: int, height: int, duration: float, source_path: str, stronger: bool):
+    """Apply deterministic slow push/pan so every segment has visible motion."""
+    zoom = 0.09 if stronger else 0.035
+    x0, x1, y0, y1 = _motion_direction(source_path)
+
+    def ease(t: float) -> float:
+        p = min(max(t / max(duration, 0.01), 0.0), 1.0)
+        return p * p * (3 - 2 * p)
+
+    def scale(t: float) -> float:
+        return 1.0 + zoom * ease(t)
+
+    def position(t: float):
+        p = ease(t)
+        current_scale = scale(t)
+        extra_x = width * (current_scale - 1.0)
+        extra_y = height * (current_scale - 1.0)
+        x_anchor = x0 + (x1 - x0) * p
+        y_anchor = y0 + (y1 - y0) * p
+        return (-extra_x * x_anchor, -extra_y * y_anchor)
+
+    moving = clip.resized(scale).with_position(position)
+    return CompositeVideoClip([moving], size=(width, height)).with_duration(duration)
+
+
+def _polish_segment(clip, width: int, height: int, duration: float, source_path: str, stronger: bool):
+    work = _cover_to_aspect(clip, width, height).with_duration(duration)
+    work = _add_camera_motion(work, width, height, duration, source_path, stronger=stronger)
+    fade = min(0.18, max(duration / 8, 0.0))
+    if fade > 0.04:
+        work = work.with_effects([vfx.FadeIn(fade), vfx.FadeOut(fade)])
+    return work
+
+
 def build_footage_segment(
     source_path: str,
     duration: float,
@@ -56,14 +115,11 @@ def build_footage_segment(
     work = None
     try:
         if _is_image(source_path):
-            # Still photo -> gentle Ken-Burns zoom, framed to the target aspect.
-            base = video.normalize_to_aspect(
-                ImageClip(source_path).with_duration(duration), width, height
+            # Still photo -> stronger Ken-Burns style motion, full-bleed.
+            work = _polish_segment(
+                ImageClip(source_path).with_duration(duration),
+                width, height, duration, source_path, stronger=True,
             )
-            zoom = base.resized(lambda t: 1 + 0.03 * (t / max(duration, 0.01)))
-            work = CompositeVideoClip(
-                [zoom.with_position("center")], size=(width, height)
-            ).with_duration(duration)
         else:
             clip = video._open_video_clip_quietly(source_path)
             src_dur = clip.duration or 0
@@ -75,7 +131,9 @@ def build_footage_segment(
                 # Loop the clip enough times to cover the scene, then trim exactly.
                 reps = max(1, math.ceil(duration / src_dur))
                 work = concatenate_videoclips([clip] * reps).subclipped(0, duration)
-            work = video.normalize_to_aspect(work, width, height)
+            work = _polish_segment(
+                work, width, height, duration, source_path, stronger=False,
+            )
 
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         return _write(work, out_path, threads)

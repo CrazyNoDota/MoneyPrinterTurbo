@@ -23,6 +23,11 @@ class TestTaskService(unittest.TestCase):
     def tearDown(self):
         pass
     
+    @unittest.skipUnless(
+        os.environ.get("RUN_INTEGRATION"),
+        "live end-to-end run (real TTS/LLM/render + toolchain); set RUN_INTEGRATION=1. "
+        "Mocked coverage lives in TestStartOrchestration.",
+    )
     def test_task_local_materials(self):
         task_id = "00000000-0000-0000-0000-000000000000"
         video_materials=[]
@@ -251,6 +256,7 @@ class TestStartOrchestration(unittest.TestCase):
         sub_maker = mock.Mock()
         with mock.patch.object(tm, "sm") as sm, \
             mock.patch.object(tm.vision, "is_enabled", return_value=False), \
+            mock.patch.object(tm.hyperframes, "mode", return_value="footage"), \
             mock.patch.object(tm, "augment_with_pinterest"), \
             mock.patch.object(tm.llm, "generate_script", return_value="a script"), \
             mock.patch.object(tm.llm, "generate_terms", return_value=["money"]), \

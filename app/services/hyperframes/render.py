@@ -76,8 +76,12 @@ def _render_env(proj: str) -> dict:
     return env
 
 
-def render(html: str, out_path: str) -> str:
-    """Write ``html`` into the project, render it, and return ``out_path`` or ``""``."""
+def render(html: str, out_path: str, fps: int = None) -> str:
+    """Write ``html`` into the project, render it, and return ``out_path`` or ``""``.
+
+    ``fps`` overrides the configured frame rate -- the preview pass renders a fast
+    low-fps proxy by passing a small value here.
+    """
     proj = project_dir()
     npx = _npx()
     if not npx or not os.path.exists(os.path.join(proj, "index.html")):
@@ -89,7 +93,7 @@ def render(html: str, out_path: str) -> str:
 
     version = config.app.get("hyperframes_version", _DEFAULT_VERSION)
     timeout = int(config.app.get("hyperframes_timeout", 600))
-    fps = str(config.app.get("hyperframes_fps", 30))
+    fps = str(fps if fps is not None else config.app.get("hyperframes_fps", 30))
 
     # Author into the project's index.html (the proven render entrypoint) and write
     # the MP4 outside the project so it survives re-scaffolding.

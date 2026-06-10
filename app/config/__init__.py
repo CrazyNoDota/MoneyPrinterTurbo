@@ -32,6 +32,15 @@ def __init_logger():
         )
         return _format
 
+    # On Windows the console defaults to a legacy codepage (e.g. cp1252) that
+    # cannot encode non-Latin text, so logging a Cyrillic/CJK script crashes
+    # the handler with UnicodeEncodeError. Force UTF-8 on the std streams.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     logger.remove()
 
     logger.add(

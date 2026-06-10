@@ -24,6 +24,13 @@ from .scenes import Scene
 # Numbers / money / percentages animate well as kinetic motion graphics; plain
 # narrative prose is better served by real footage.
 _NUMERIC = re.compile(r"\d|%|\$|€|£")
+_WORD = re.compile(r"[A-Za-z][A-Za-z'-]{2,}")
+_STOPWORDS = {
+    "the", "and", "for", "with", "from", "this", "that", "into", "over", "under",
+    "between", "while", "where", "when", "also", "have", "has", "had", "been",
+    "being", "made", "make", "more", "than", "its", "their", "they", "these",
+    "those", "through", "around", "including", "years", "recent",
+}
 
 _VALID_KINDS = ("footage", "motiongraphics")
 
@@ -47,16 +54,46 @@ def _heuristic_kind(text: str) -> str:
     return "motiongraphics" if _NUMERIC.search(text or "") else "footage"
 
 
-def _heuristic_plan(scenes: List[Scene], subject: str) -> List[ScenePlan]:
+def _terms_list(video_terms) -> List[str]:
+    if isinstance(video_terms, str):
+        return [t.strip() for t in re.split(r"[,，]", video_terms) if t.strip()]
+    if isinstance(video_terms, (list, tuple)):
+        return [str(t).strip() for t in video_terms if str(t).strip()]
+    return []
+
+
+def _query_from_scene(text: str, subject: str, fallback: str = "") -> str:
+    words = []
+    for w in _WORD.findall(text or ""):
+        key = w.lower().strip("'")
+        if key in _STOPWORDS or key in words:
+            continue
+        words.append(key)
+        if len(words) >= 3:
+            break
+
+    subject_words = _WORD.findall(subject or "")
+    prefix = subject_words[0] if subject_words else ""
+    pieces = []
+    if prefix and prefix.lower() not in words:
+        pieces.append(prefix)
+    pieces.extend(words)
+    query = " ".join(pieces[:4]).strip()
+    return query or fallback or subject or (text or "")[:60].strip()
+
+
+def _heuristic_plan(scenes: List[Scene], subject: str, video_terms=None) -> List[ScenePlan]:
     """Deterministic fallback used when the LLM is unavailable or invalid."""
     plans: List[ScenePlan] = []
-    for s in scenes:
+    terms = _terms_list(video_terms)
+    for i, s in enumerate(scenes):
         kind = _heuristic_kind(s.text)
+        fallback = terms[i % len(terms)] if terms else ""
         plans.append(
             ScenePlan(
                 scene=s,
                 kind=kind,
-                query=(subject or s.text[:60]).strip(),
+                query=_query_from_scene(s.text, subject, fallback=fallback),
                 use_background=(kind == "motiongraphics"),
             )
         )
@@ -137,7 +174,7 @@ def _coerce(scenes, data, subject) -> List[ScenePlan]:
         kind = str(d.get("kind", "")).strip().lower()
         if kind not in _VALID_KINDS:
             kind = _heuristic_kind(s.text)
-        query = (str(d.get("query", "")).strip() or subject or s.text[:60]).strip()
+        query = (str(d.get("query", "")).strip() or _query_from_scene(s.text, subject)).strip()
         ref = d.get("material_ref", None)
         if not isinstance(ref, int):
             ref = None
@@ -168,12 +205,12 @@ def build_plan(
         raw = llm._generate_response(prompt=prompt)
     except Exception as exc:  # noqa: BLE001 - planning is best-effort
         logger.warning(f"hyperframes planner LLM call failed: {exc}; using heuristic")
-        return _heuristic_plan(scenes, subject)
+        return _heuristic_plan(scenes, subject, video_terms)
 
     data = _parse(raw, len(scenes))
     if data is None:
         logger.warning("hyperframes planner: invalid LLM plan; using heuristic")
-        return _heuristic_plan(scenes, subject)
+        return _heuristic_plan(scenes, subject, video_terms)
 
     plans = _coerce(scenes, data, subject)
     mg = sum(1 for p in plans if p.is_mg)

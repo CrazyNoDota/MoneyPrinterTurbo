@@ -28,7 +28,7 @@ from app.config import config
 from app.models.schema import VideoAspect
 from app.utils import utils
 
-from . import assemble, assets, author, plan, render, scenes
+from . import assemble, assets, author, plan, preview, render, scenes
 
 ClipScene = scenes.Scene
 
@@ -96,9 +96,10 @@ def _render_mg_block(task_id, params, subject, width, height, block, source, idx
 
     backgrounds = []
     if images_enabled():
+        count = int(config.app.get("hyperframes_bg_count", 2) or 2)
         for p in block:
             if p.use_background and p.query:
-                backgrounds.extend(assets.fetch_backgrounds(p.query, params, source, count=1))
+                backgrounds.extend(assets.fetch_backgrounds(p.query, params, source, count=count))
 
     html = author.author_block(rebased, subject, width, height, backgrounds=backgrounds)
     if not html:
@@ -122,17 +123,23 @@ def _footage_segment(task_id, params, plan_item, width, height, source, idx) -> 
 def render_directed_video(
     task_id, params, video_script, audio_file, subtitle_path, audio_duration,
     video_terms=None, material_hints=None,
-) -> str:
-    """Director mode: plan each scene, render MG blocks, stitch with native footage."""
+):
+    """Director mode: plan each scene, render MG blocks, stitch with native footage.
+
+    Returns ``(video_path, footage_ranges)`` where ``footage_ranges`` is a list of
+    ``(start, end)`` seconds for scenes rendered as plain footage (no baked text).
+    Captions should be burned only over those ranges -- motion-graphics scenes
+    already render the narration as kinetic typography. ``("", [])`` on failure.
+    """
     if not is_available():
         logger.warning("hyperframes enabled but toolchain not installed; run setup-hyperframes.bat")
-        return ""
+        return "", []
 
     total = float(audio_duration or 0)
     scene_list = scenes.build_scenes(video_script, subtitle_path, total)
     if not scene_list:
         logger.warning("hyperframes director: no scenes; falling back to stock footage")
-        return ""
+        return "", []
 
     width, height = _resolution(params)
     subject = (getattr(params, "video_subject", "") or "").strip()
@@ -145,6 +152,8 @@ def render_directed_video(
     assets.reset()
 
     segments: List[assemble.Segment] = []
+    # Scenes shown as plain footage (no baked text) -- captions belong only here.
+    footage_ranges: List[tuple] = []
     i, n, idx = 0, len(plans), 0
     while i < n:
         if plans[i].is_mg:
@@ -163,20 +172,23 @@ def render_directed_video(
                     idx += 1
                     if fs:
                         segments.append(assemble.Segment(start=p.scene.start, file_path=fs))
+                        footage_ranges.append((p.scene.start, p.scene.end))
             i = j
         else:
             fs = _footage_segment(task_id, params, plans[i], width, height, footage_source, idx)
             idx += 1
             if fs:
                 segments.append(assemble.Segment(start=plans[i].scene.start, file_path=fs))
+                footage_ranges.append((plans[i].scene.start, plans[i].scene.end))
             i += 1
 
     if not segments:
         logger.warning("hyperframes director: produced no segments; falling back to stock footage")
-        return ""
+        return "", []
 
     combined = os.path.join(utils.task_dir(task_id), "combined-1.mp4")
-    return assemble.assemble(combined, segments, threads=getattr(params, "n_threads", 2))
+    out = assemble.assemble(combined, segments, threads=getattr(params, "n_threads", 2))
+    return (out, footage_ranges) if out else ("", [])
 
 
 def _solely_backgrounds(params, video_terms, source, cap=5):
@@ -229,6 +241,24 @@ def render_video(
     if not html:
         logger.warning("hyperframes: composition authoring failed; falling back to stock footage")
         return ""
+
+    # Optional fast preview pass: render a low-fps proxy and flag broken (black /
+    # empty) scenes before paying for the full-rate render. Non-blocking by design.
+    if preview.is_enabled():
+        try:
+            report = preview.preview(html, scene_list, utils.task_dir(task_id))
+            if report.issues:
+                logger.warning(
+                    f"hyperframes preview flagged {len(report.issues)} scene(s): "
+                    f"{report.issues}. Contact sheet: {report.contact_sheet}"
+                )
+            else:
+                logger.info(
+                    f"hyperframes preview clean ({len(scene_list)} scenes). "
+                    f"Contact sheet: {report.contact_sheet or 'n/a'}"
+                )
+        except Exception as exc:  # noqa: BLE001 - preview must never block the render
+            logger.warning(f"hyperframes preview pass failed (non-fatal): {exc}")
 
     out_path = os.path.join(utils.task_dir(task_id), "hyperframes.mp4")
     return render.render(html, out_path)

@@ -530,7 +530,15 @@ def generate_video(
     subtitle_path: str,
     output_file: str,
     params: VideoParams,
+    subtitle_ranges: List[tuple] = None,
 ):
+    """Compose the final video.
+
+    ``subtitle_ranges`` (optional) is a list of ``(start, end)`` seconds; when
+    given, only subtitle lines whose timing falls inside one of those ranges are
+    burned in. Used by hyperframes *mixed* mode to caption footage scenes while
+    leaving motion-graphics scenes (which already render the narration) untouched.
+    """
     aspect = VideoAspect(params.video_aspect)
     video_width, video_height = aspect.to_resolution()
 
@@ -570,6 +578,45 @@ def generate_video(
     #   box     -> the legacy solid background box (uses text_background_color)
     subtitle_style = (getattr(params, "subtitle_style", "") or "tiktok").strip().lower()
 
+    def split_long_subtitle(subtitle_item):
+        """Split a long subtitle range into sequential readable caption chunks."""
+        start, end = subtitle_item[0][0], subtitle_item[0][1]
+        phrase = subtitle_item[1]
+        words = phrase.split()
+        if len(words) <= 9:
+            return [subtitle_item]
+
+        chunks = []
+        current = []
+        current_chars = 0
+        for word in words:
+            next_chars = current_chars + len(word) + (1 if current else 0)
+            if current and (len(current) >= 8 or next_chars > 46):
+                chunks.append(" ".join(current))
+                current = [word]
+                current_chars = len(word)
+            else:
+                current.append(word)
+                current_chars = next_chars
+        if current:
+            chunks.append(" ".join(current))
+        if len(chunks) <= 1:
+            return [subtitle_item]
+
+        total_words = sum(len(c.split()) for c in chunks)
+        total_duration = max(end - start, 0.01)
+        cursor = start
+        split_items = []
+        for i, chunk in enumerate(chunks):
+            if i == len(chunks) - 1:
+                chunk_end = end
+            else:
+                share = len(chunk.split()) / max(total_words, 1)
+                chunk_end = min(end, cursor + total_duration * share)
+            split_items.append(((cursor, chunk_end), chunk))
+            cursor = chunk_end
+        return split_items
+
     def create_text_clips(subtitle_item):
         """Return the positioned clip(s) for one subtitle line.
 
@@ -583,19 +630,28 @@ def generate_video(
         if subtitle_style == "tiktok":
             phrase = phrase.upper()
         max_width = video_width * 0.9
-        wrapped_txt, txt_height = wrap_text(
-            phrase, max_width=max_width, font=font_path, fontsize=font_size
-        )
-        interline = int(font_size * 0.25)
-        line_count = wrapped_txt.count("\n") + 1
-        vertical_padding = int(font_size * 0.35)
+        max_caption_height = video_height * 0.28
+        min_font_size = max(28, int(params.font_size * 0.55))
+
+        while True:
+            wrapped_txt, txt_height = wrap_text(
+                phrase, max_width=max_width, font=font_path, fontsize=font_size
+            )
+            interline = int(font_size * 0.25)
+            line_count = wrapped_txt.count("\n") + 1
+            vertical_padding = int(font_size * 0.35)
+            rendered_height = txt_height + vertical_padding + (interline * line_count)
+            if rendered_height <= max_caption_height or font_size <= min_font_size:
+                break
+            font_size = max(min_font_size, font_size - 4)
+
         # MoviePy 在 `method=label` 下会自动收缩文本框高度，遇到多行字幕、
         # 描边或背景色时，容易把最后一行的下半部分裁掉。这里显式传入
         # 一个更保守的高度，把行间距和额外上下留白一并算进去，保证字幕
         # 背景框与文字本身都能完整渲染出来。
         size = (
             int(max_width),
-            int(txt_height + vertical_padding + (interline * line_count)),
+            int(rendered_height),
         )
 
         # Only the legacy "box" style draws a background rectangle. Without a box
@@ -682,14 +738,27 @@ def generate_video(
             font_size=params.font_size,
         )
 
+    def _in_subtitle_ranges(item) -> bool:
+        # No filter => caption everything (default footage pipeline). Otherwise keep
+        # only lines whose midpoint lands inside an allowed (footage) range.
+        if subtitle_ranges is None:
+            return True
+        start, end = item[0][0], item[0][1]
+        mid = (start + end) / 2
+        return any(lo <= mid <= hi for lo, hi in subtitle_ranges)
+
     if subtitle_path and os.path.exists(subtitle_path):
         sub = SubtitlesClip(
             subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip
         )
         text_clips = []
         for item in sub.subtitles:
-            text_clips.extend(create_text_clips(subtitle_item=item))
-        video_clip = CompositeVideoClip([video_clip, *text_clips])
+            if not _in_subtitle_ranges(item):
+                continue
+            for split_item in split_long_subtitle(item):
+                text_clips.extend(create_text_clips(subtitle_item=split_item))
+        if text_clips:
+            video_clip = CompositeVideoClip([video_clip, *text_clips])
 
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:

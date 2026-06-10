@@ -198,6 +198,15 @@ video_gen_poll_interval = 5   # seconds between status polls
 # Leave empty to fall back to hyperframes_enabled below.
 video_visual_mode = ""
 hyperframes_enabled = false   # solely-hyperframes mode (equivalent to video_visual_mode="hyperframes")
+# Authoring engine for motion-graphics compositions:
+#   "studio"   -> deterministic templates (default): each scene is classified into an
+#                 archetype (stat counter / kinetic statement) and rendered from
+#                 hardened templates -- no overlapping text, no black frames, no LLM in
+#                 the layout loop. Most reliable for production.
+#   "freeform" -> the LLM authors the whole HTML/CSS/GSAP document (more creative,
+#                 less predictable). Studio falls back to this automatically if it ever
+#                 fails to produce a valid composition.
+hyperframes_engine = "studio"
 hyperframes_dir = ".hyperframes"   # project dir created by setup-hyperframes.bat
 hyperframes_version = "0.6.58"     # pinned CLI version for reproducible renders
 hyperframes_node = ""         # optional dir containing node/npx; else found on PATH
@@ -208,7 +217,17 @@ hyperframes_timeout = 600     # seconds to wait for a single render before givin
 # render stays deterministic). hyperframes_image_provider defaults to video_source.
 hyperframes_images = true
 hyperframes_image_provider = ""   # "pexels" | "pixabay" | "" (follow video_source)
-hyperframes_bg_count = 1          # background photos fetched per motion-graphics scene
+hyperframes_bg_count = 2          # background photos fetched per motion-graphics scene
+# The hyperframes composition already renders the narration as kinetic typography,
+# so the burned .srt caption is suppressed by default to avoid two text layers
+# colliding. Set true only if you want the .srt subtitles burned on top as well.
+hyperframes_burn_subtitles = false
+# Preview pass (solely mode): before the full-rate render, render a fast low-fps
+# proxy, sample one frame per scene, flag near-empty/black scenes, and write a
+# contact-sheet PNG to the task dir for a quick eyeball. Off by default (the proxy
+# adds time). hyperframes_preview_fps controls the proxy frame rate.
+hyperframes_preview = false
+hyperframes_preview_fps = 3
 
 ########## Qwen3-TTS (local voice, isolated env)
 # A high-quality local neural TTS (more natural than Silero, supports Russian +
