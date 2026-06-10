@@ -743,8 +743,8 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     # track timed to the narration instead of gathering stock/local footage; if it
     # produces nothing (toolchain missing / authoring failed), fall back to stock.
     hf_video = ""
-    # None => solely mode (suppress all burned captions); a list => mixed mode
-    # (caption only the footage scenes whose ranges these are).
+    # None => solely mode (suppress all burned captions); a list => mixed/news
+    # mode (caption only the (start, end) ranges in the list).
     hf_footage_ranges = None
     hf_mode = hyperframes.mode(params)
     if hf_mode == "mixed":
@@ -757,6 +757,18 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         if not hf_video:
             logger.warning(
                 "hyperframes director produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "news":
+        # News: deterministic headline + lower-third composition with an optional
+        # talking-head presenter in the corner. Captions burn only when no head
+        # was produced (the ranges then span the whole video).
+        hf_video, hf_footage_ranges = hyperframes.render_news_video(
+            task_id, params, video_script, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes news produced no video; falling back to stock/local footage"
             )
     elif hf_mode == "hyperframes":
         hf_video = hyperframes.render_video(

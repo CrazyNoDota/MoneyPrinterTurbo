@@ -183,8 +183,9 @@ video_gen_timeout = 300       # seconds to wait for a single clip before giving 
 video_gen_poll_interval = 5   # seconds between status polls
 
 ########## Talking head
-# Optional presenter video layer. Phase 1 only installs the provider module; the
-# main video compositor is wired in a later phase. All failures are non-fatal.
+# Optional presenter video layer, used by video_visual_mode = "news" (a talking
+# head composited into a corner of the news layout). All failures are non-fatal:
+# the news video is still produced without the head, with burned captions instead.
 #
 # provider:
 #   auto    -> Azure TTS Avatar first, then Wav2Lip fallback
@@ -197,7 +198,10 @@ avatar_enabled = false
 avatar_provider = "auto"
 avatar_character = "lisa"              # Azure standard avatar catalog character
 avatar_style = "casual-sitting"        # Azure standard avatar style
-avatar_voice = "en-US-JennyNeural"     # used when synthesize() presenter is empty
+# Voice for the Azure avatar's built-in TTS. In news mode keep this matched to
+# the pipeline TTS voice (e.g. azure-tts-...-Neural) so the lips track the
+# narration audio; mismatched voices drift out of sync.
+avatar_voice = "en-US-JennyNeural"
 avatar_portrait = ""                   # portrait photo path for Wav2Lip/custom photo
 avatar_prefer_alpha = true             # use webm/vp9+transparent when confirmed available
 avatar_alpha_supported = false         # set true only in regions/accounts that support it
@@ -217,6 +221,12 @@ wav2lip_weights = ""                   # override models/wav2lip/wav2lip_gan.pth
 wav2lip_timeout = 1800
 wav2lip_resize_factor = ""
 
+# Where the presenter sits in the news layout (video_visual_mode = "news"). The
+# lower-third plate stays in the lower-left, so bottom-right is the safe default.
+news_presenter_scale = 0.38            # presenter width as a fraction of frame width
+news_presenter_position = "bottom-right"  # bottom-right | bottom-left | top-right | top-left
+news_presenter_margin = 0.04           # corner inset as a fraction of frame width
+
 ########## Hyperframes (motion-graphics video)
 # Build the whole video from motion graphics instead of stock footage: an LLM
 # authors an HTML/GSAP composition (kinetic typography, animated numbers/lists)
@@ -230,6 +240,10 @@ wav2lip_resize_factor = ""
 #   "mixed"       the "director": the LLM tags each scene as real footage or motion
 #                 graphics; footage scenes stay native, MG scenes are rendered, and the
 #                 segments are stitched together in order.
+#   "news"        deterministic news layout: persistent headline plate + per-scene
+#                 lower-third over a motion background, with an optional talking-head
+#                 presenter in a corner (see the Talking head block above). Captions
+#                 are burned only when no presenter could be produced.
 # Leave empty to fall back to hyperframes_enabled below.
 video_visual_mode = ""
 hyperframes_enabled = false   # solely-hyperframes mode (equivalent to video_visual_mode="hyperframes")

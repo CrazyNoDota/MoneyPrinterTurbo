@@ -10,12 +10,14 @@ sources are real clips (subclipped/looped to the scene length) or stock photos
 import math
 import os
 import hashlib
+import subprocess
 from dataclasses import dataclass
 from typing import List, Optional
 
 from loguru import logger
 from moviepy import CompositeVideoClip, ImageClip, concatenate_videoclips, vfx
 
+from app.config import config
 from app.models import const
 from app.services import video
 from app.utils import utils
@@ -144,6 +146,90 @@ def build_footage_segment(
         for c in (work, clip):
             if c is not None:
                 video.close_clip(c)
+
+
+_OVERLAY_POSITIONS = ("bottom-right", "bottom-left", "top-right", "top-left")
+
+
+def overlay_presenter(
+    base_path: str,
+    presenter_path: str,
+    out_path: str,
+    width: int,
+    height: int,
+    threads: int = 2,
+    scale: float = None,
+    position: str = None,
+    margin: float = None,
+) -> str:
+    """Composite the talking-head clip into a corner of the base track, or "".
+
+    The presenter is scaled to ``scale`` x frame width and pinned to ``position``
+    with a ``margin`` (fraction of frame width) inset. A ``.webm`` presenter is
+    decoded with libvpx-vp9 so its alpha channel survives (Azure's transparent
+    avatars); an opaque mp4 overlays as a plain rectangle. When the presenter is
+    shorter than the base the overlay simply ends (``eof_action=pass``) -- the
+    base keeps playing. Returns ``out_path`` on success, ``""`` on any failure
+    so the caller can fall back to the head-less base track.
+    """
+    if not base_path or not os.path.isfile(base_path):
+        return ""
+    if not presenter_path or not os.path.isfile(presenter_path) or os.path.getsize(presenter_path) == 0:
+        return ""
+
+    scale = float(scale if scale is not None else config.app.get("news_presenter_scale", 0.38))
+    position = str(position or config.app.get("news_presenter_position", "bottom-right")).strip().lower()
+    if position not in _OVERLAY_POSITIONS:
+        position = "bottom-right"
+    margin = float(margin if margin is not None else config.app.get("news_presenter_margin", 0.04))
+
+    # Even pixel width keeps libx264 happy; height follows the source aspect.
+    overlay_w = max(2, int(round(width * scale)) // 2 * 2)
+    m = max(0, int(round(width * margin)))
+    x = f"main_w-overlay_w-{m}" if position.endswith("right") else str(m)
+    y = f"main_h-overlay_h-{m}" if position.startswith("bottom") else str(m)
+    filter_complex = (
+        f"[1:v]scale={overlay_w}:-2[pres];"
+        f"[0:v][pres]overlay=x={x}:y={y}:eof_action=pass:format=auto[v]"
+    )
+
+    cmd = [video.get_ffmpeg_binary(), "-y", "-i", base_path]
+    if presenter_path.lower().endswith(".webm"):
+        cmd.extend(["-c:v", "libvpx-vp9"])
+    cmd.extend([
+        "-i", presenter_path,
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-an",
+        "-c:v", video.video_codec, "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        # The base track was rendered at hyperframes_fps -- keep its timing.
+        "-r", str(config.app.get("hyperframes_fps", video.fps)),
+        "-threads", str(threads or 2),
+        out_path,
+    ])
+
+    timeout = int(config.app.get("hyperframes_timeout", 600))
+    try:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        logger.info(f"overlaying presenter ({position}, {scale:.0%} width) -> {os.path.basename(out_path)}")
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[-800:]
+            logger.warning(f"presenter overlay failed (rc={proc.returncode}): {detail}")
+            return ""
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            logger.success(f"presenter overlaid -> {os.path.basename(out_path)}")
+            return out_path
+        logger.warning("presenter overlay produced no output")
+        return ""
+    except subprocess.TimeoutExpired:
+        logger.warning(f"presenter overlay timed out after {timeout}s")
+        return ""
+    except Exception as e:  # noqa: BLE001 - the head layer is always optional
+        logger.warning(f"presenter overlay error: {e}")
+        return ""
 
 
 def assemble(combined_path: str, segments: List[Segment], threads: int = 2) -> str:

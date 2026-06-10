@@ -252,6 +252,155 @@ def _js(text: str) -> str:
     return (text or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
+# ---------------------------------------------------------------------------
+# "news" archetype: persistent headline plate + per-scene lower-third плашка.
+# The lower-right corner is deliberately kept clear for the talking-head
+# presenter overlay (see assemble.overlay_presenter).
+# ---------------------------------------------------------------------------
+
+_NEWS_CSS = """
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:__W__px; height:__H__px; overflow:hidden;
+  background:#020617; font-family:'Arial Black','Helvetica Neue Bold',Impact,system-ui,sans-serif; }
+#root { position:relative; width:__W__px; height:__H__px; }
+.clip { position:absolute; inset:0; }
+.bg-base { background:linear-gradient(160deg,#0f172a 0%,#020617 70%,#000 100%); }
+.bg-photo { width:100%; height:100%; object-fit:cover; will-change:transform; }
+.scrim { background:linear-gradient(180deg,rgba(2,6,23,.4) 0%,rgba(2,6,23,.5) 45%,rgba(2,6,23,.85) 100%); }
+.headline-wrap { display:flex; align-items:flex-start; justify-content:center; padding:5% 5% 0; }
+.headline-plate { display:flex; flex-direction:column; align-items:center; gap:1.2vh;
+  max-width:92%; will-change:transform,opacity; }
+.headline-tag { background:__ACCENT__; color:#020617; font-size:clamp(20px,2.6vw,34px);
+  letter-spacing:.22em; padding:.35em .9em; border-radius:4px; }
+.headline-text { color:#fff; font-size:clamp(40px,6.4vw,84px); line-height:1.1;
+  text-align:center; text-shadow:0 4px 22px rgba(0,0,0,.7); }
+.lt-wrap { display:flex; align-items:flex-end; justify-content:flex-start;
+  padding:0 0 16% 4.5%; }
+.lt-plate { display:flex; align-items:stretch; max-width:52%;
+  background:rgba(2,6,23,.82); border-radius:6px; overflow:hidden;
+  box-shadow:0 10px 36px rgba(0,0,0,.45); will-change:transform,opacity; }
+.lt-bar { width:.55em; flex:0 0 auto; background:__ACCENT__; }
+.lt-text { color:#fff; font-size:clamp(30px,4.6vw,60px); line-height:1.18;
+  padding:.55em .8em; }
+"""
+
+
+def _kicker(text: str, max_chars: int = 38) -> str:
+    """A short lower-third line: the first words of the scene, word-safe trimmed."""
+    words = (text or "").split()
+    out = ""
+    for w in words:
+        candidate = f"{out} {w}".strip()
+        if out and len(candidate) > max_chars:
+            return out.upper()
+        out = candidate
+    # A single token longer than the plate still has to fit.
+    return out[:max_chars].upper()
+
+
+def _news_scene_html(spec: SceneSpec, idx: int) -> str:
+    s = spec.scene
+    start = round(s.start, 3)
+    dur = round(s.duration, 3)
+    parts = []
+    if spec.background is not None:
+        name = _asset_name(spec.background)
+        if name:
+            parts.append(
+                f'<img id="nbg-{idx}" class="clip bg-photo" data-start="{start}" '
+                f'data-duration="{dur}" data-track-index="1" src="assets/{_esc(name)}">'
+            )
+            parts.append(
+                f'<div class="clip scrim" data-start="{start}" data-duration="{dur}" '
+                f'data-track-index="2"></div>'
+            )
+    parts.append(
+        f'<div id="lt-{idx}" class="clip lt-wrap" data-start="{start}" '
+        f'data-duration="{dur}" data-track-index="4">'
+        f'<div class="lt-plate"><div class="lt-bar"></div>'
+        f'<div class="lt-text">{_esc(_kicker(spec.caption))}</div></div></div>'
+    )
+    return "\n    ".join(parts)
+
+
+def _news_scene_tweens(spec: SceneSpec, idx: int) -> str:
+    s = spec.scene
+    start = round(s.start, 3)
+    end = round(s.end, 3)
+    dur = round(s.duration, 3)
+    exit_at = round(max(start + 0.2, end - 0.4), 3)
+    js = []
+    if spec.background is not None and _asset_name(spec.background):
+        js.append(
+            f'tl.fromTo("#nbg-{idx}",{{scale:1.0}},'
+            f'{{scale:1.08,duration:{dur},ease:"none"}},{start});'
+        )
+    # Lower-third slides in from the left, holds, then fades before the next scene.
+    js.append(
+        f'tl.fromTo("#lt-{idx} .lt-plate",{{autoAlpha:0,x:-64}},'
+        f'{{autoAlpha:1,x:0,duration:0.5,ease:"power3.out"}},{round(start + 0.1, 3)});'
+    )
+    js.append(
+        f'tl.to("#lt-{idx}",{{autoAlpha:0,duration:0.35,ease:"power2.in"}},{exit_at});'
+    )
+    return "\n    ".join(js)
+
+
+def compose_news(scenes: List[Scene], subject: str, width: int, height: int,
+                 total: float, backgrounds=None) -> str:
+    """Compose the deterministic "news" layout. ``""`` on any problem.
+
+    Layout: persistent gradient base, per-scene photo background with a scrim,
+    a persistent headline plate (the video subject) at the top, and a per-scene
+    lower-third with the scene's opening words. The lower-right quadrant stays
+    empty so the presenter overlay never covers any text.
+    """
+    try:
+        if not scenes or total <= 0:
+            return ""
+        specs = build_specs(scenes, backgrounds)
+        css = (_NEWS_CSS.replace("__W__", str(width)).replace("__H__", str(height))
+               .replace("__ACCENT__", _ACCENT))
+        total_r = round(total, 3)
+
+        headline = _esc((subject or "").strip().upper() or "NEWS")
+        clips = [
+            f'<div class="clip bg-base" data-start="0" data-duration="{total_r}" data-track-index="0"></div>'
+        ]
+        for i, spec in enumerate(specs):
+            clips.append(_news_scene_html(spec, i))
+        clips.append(
+            f'<div id="headline" class="clip headline-wrap" data-start="0" '
+            f'data-duration="{total_r}" data-track-index="3">'
+            f'<div class="headline-plate"><span class="headline-tag">NEWS</span>'
+            f'<span class="headline-text">{headline}</span></div></div>'
+        )
+
+        tweens = [
+            'tl.fromTo("#headline .headline-plate",{autoAlpha:0,y:-44},'
+            '{autoAlpha:1,y:0,duration:0.6,ease:"power3.out"},0.05);'
+        ]
+        for i, spec in enumerate(specs):
+            tweens.append(_news_scene_tweens(spec, i))
+
+        html = (
+            "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+            f'<script src="{_GSAP}"></script>\n<style>{css}</style>\n</head>\n<body>\n'
+            f'<div id="root" data-composition-id="main" data-start="0" '
+            f'data-duration="{total_r}" data-width="{width}" data-height="{height}">\n  '
+            + "\n  ".join(clips)
+            + "\n</div>\n<script>\nwindow.__timelines = window.__timelines || {};\n"
+            "const tl = gsap.timeline({ paused: true });\n    "
+            + "\n    ".join(tweens)
+            + '\nwindow.__timelines["main"] = tl;\n</script>\n</body>\n</html>\n'
+        )
+        logger.success(f"hyperframes studio: composed news layout ({len(specs)} scene(s))")
+        return html
+    except Exception as exc:  # noqa: BLE001 - composition must never hard-fail a run
+        logger.warning(f"hyperframes studio compose_news failed: {exc}")
+        return ""
+
+
 def compose(scenes: List[Scene], subject: str, width: int, height: int,
             total: float, backgrounds=None) -> str:
     """Compose a complete, contract-compliant composition. ``""`` on any problem."""

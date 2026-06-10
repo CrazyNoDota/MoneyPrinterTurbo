@@ -271,6 +271,31 @@ def author_composition(scenes: List[Scene], subject: str, width: int, height: in
     return ""
 
 
+def author_news(scenes: List[Scene], subject: str, width: int, height: int, backgrounds=None) -> str:
+    """Compose the deterministic news layout and validate it. ``""`` on failure.
+
+    News is template-only by design (the freeform LLM author doesn't know the
+    headline/lower-third layout contract), so there is no freeform fallback --
+    a failure here sends the caller to the stock-footage pipeline instead.
+    """
+    if not scenes:
+        return ""
+    total = max((s.end for s in scenes), default=0.0)
+    if total <= 0:
+        return ""
+    asset_files = [_asset_name(b) for b in (backgrounds or [])]
+    html = studio.compose_news(scenes, subject, width, height, total, backgrounds=backgrounds)
+    if not html:
+        logger.warning("hyperframes news: studio produced nothing")
+        return ""
+    ok, reason = _validate(html, len(scenes), total, asset_files)
+    if not ok:
+        logger.warning(f"hyperframes news composition rejected: {reason}")
+        return ""
+    logger.success(f"hyperframes: news composition ({len(html)} chars)")
+    return html
+
+
 def author_block(scenes: List[Scene], subject: str, width: int, height: int, backgrounds=None) -> str:
     """Author a composition for one contiguous block of MG scenes.
 

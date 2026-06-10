@@ -6,13 +6,16 @@ GSAP into a deterministic MP4 via headless Chrome + ffmpeg. Unlike ``videogen``
 -- kinetic typography, animated numbers/lists -- now optionally over real photo
 backgrounds pulled from the internet.
 
-Three visual modes (see :func:`mode`):
+Four visual modes (see :func:`mode`):
 - ``footage``     -- unchanged stock/local footage pipeline (hyperframes off).
 - ``hyperframes`` -- "solely": the whole visual track is one authored composition
   timed to the narration (with on-demand photo backgrounds).
 - ``mixed``       -- the "director": the LLM tags each scene footage vs motion
   graphics; footage scenes stay native, MG scenes are rendered and the segments
   are stitched in order.
+- ``news``        -- deterministic news layout (headline plate + per-scene
+  lower-third over a motion background) with an optional talking-head presenter
+  (the ``avatar`` module) composited into a corner.
 
 Every path is non-fatal: any problem returns ``""`` and ``task.py`` falls back to
 the stock-footage pipeline.
@@ -32,7 +35,7 @@ from . import assemble, assets, author, plan, preview, render, scenes
 
 ClipScene = scenes.Scene
 
-_VALID_MODES = ("footage", "hyperframes", "mixed")
+_VALID_MODES = ("footage", "hyperframes", "mixed", "news")
 
 
 def is_enabled(params=None) -> bool:
@@ -43,7 +46,7 @@ def is_enabled(params=None) -> bool:
 
 
 def mode(params=None) -> str:
-    """Resolve the visual mode: footage | hyperframes | mixed."""
+    """Resolve the visual mode: footage | hyperframes | mixed | news."""
     m = (getattr(params, "video_visual_mode", "") or "").strip().lower()
     if m in _VALID_MODES:
         return m
@@ -191,6 +194,104 @@ def render_directed_video(
     return (out, footage_ranges) if out else ("", [])
 
 
+def _news_presenter(task_id, params, video_script, audio_file, width, height) -> str:
+    """Best-effort talking-head clip for the news corner overlay, or ``""``.
+
+    The Azure path synthesizes from the script text (TTS lives inside the avatar
+    request -- keep ``avatar_voice`` matched to the pipeline TTS voice so lips
+    track the narration). When that yields nothing, Wav2Lip lip-syncs the actual
+    narration audio onto the configured portrait, which is exact by construction.
+    """
+    from app.services import avatar
+
+    if not avatar.is_enabled():
+        return ""
+
+    # The presenter occupies a corner, so request a square clip -- a full-frame
+    # portrait would scale into a towering overlay.
+    side = min(int(width or 1080), int(height or 1920))
+    voice = str(config.app.get("avatar_voice", "") or "")
+    use_alpha = bool(config.app.get("avatar_prefer_alpha", True)) and bool(
+        config.app.get("avatar_alpha_supported", False)
+    )
+    ext = "webm" if use_alpha else "mp4"
+    out_path = os.path.join(utils.task_dir(task_id), f"presenter.{ext}")
+    try:
+        result = avatar.synthesize(
+            video_script, presenter=voice, out_path=out_path, width=side, height=side
+        )
+    except Exception as exc:  # noqa: BLE001 - the head layer is always optional
+        logger.warning(f"avatar synthesis failed (non-fatal): {exc}")
+        result = ""
+    if result:
+        return result
+
+    # Wav2Lip can't read a script; retry it with the narration audio when allowed.
+    provider = str(config.app.get("avatar_provider", "auto") or "auto").strip().lower()
+    if provider in ("", "auto", "wav2lip") and audio_file and os.path.isfile(audio_file):
+        try:
+            result = avatar.Wav2LipAvatar().synthesize(
+                script_or_audio=audio_file,
+                presenter="",
+                out_path=os.path.join(utils.task_dir(task_id), "presenter.mp4"),
+                width=side,
+                height=side,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"wav2lip presenter failed (non-fatal): {exc}")
+            result = ""
+    return result or ""
+
+
+def render_news_video(
+    task_id, params, video_script, audio_file, subtitle_path, audio_duration,
+    video_terms=None,
+):
+    """News mode: deterministic news composition + optional presenter overlay.
+
+    Returns ``(video_path, caption_ranges)``. When the presenter covers the video
+    the ranges are ``[]`` (the head + lower-thirds carry the words -- burn no
+    captions); when no head could be produced they span the whole video so the
+    narration stays readable. ``("", [])`` on failure -> stock-footage fallback.
+    """
+    if not is_available():
+        logger.warning("hyperframes news enabled but toolchain not installed; run setup-hyperframes.bat")
+        return "", []
+
+    total = float(audio_duration or 0)
+    scene_list = scenes.build_scenes(video_script, subtitle_path, total)
+    if not scene_list:
+        logger.warning("hyperframes news: no scenes; falling back to stock footage")
+        return "", []
+
+    width, height = _resolution(params)
+    subject = (getattr(params, "video_subject", "") or "").strip()
+
+    assets.reset()
+    backgrounds = _solely_backgrounds(params, video_terms, _image_source(params))
+
+    html = author.author_news(scene_list, subject, width, height, backgrounds=backgrounds)
+    if not html:
+        logger.warning("hyperframes news: composition failed; falling back to stock footage")
+        return "", []
+
+    base = render.render(html, os.path.join(utils.task_dir(task_id), "news-base.mp4"))
+    if not base:
+        return "", []
+
+    end = round(max(total, scene_list[-1].end), 3)
+    presenter = _news_presenter(task_id, params, video_script, audio_file, width, height)
+    if presenter:
+        out = assemble.overlay_presenter(
+            base, presenter, os.path.join(utils.task_dir(task_id), "news.mp4"),
+            width, height, threads=getattr(params, "n_threads", 2),
+        )
+        if out:
+            return out, []
+        logger.warning("news presenter overlay failed; continuing without the talking head")
+    return base, [(0.0, end)]
+
+
 def _solely_backgrounds(params, video_terms, source, cap=5):
     """A small rotating set of real photos for solely mode (subject + terms)."""
     if not images_enabled():
@@ -266,5 +367,5 @@ def render_video(
 
 __all__ = [
     "is_enabled", "mode", "is_available", "images_enabled",
-    "render_video", "render_directed_video", "ClipScene",
+    "render_video", "render_directed_video", "render_news_video", "ClipScene",
 ]

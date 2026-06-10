@@ -27,6 +27,9 @@ _APP_DEFAULTS = {
     "wav2lip_weights": "",
     "wav2lip_timeout": 1800,
     "wav2lip_resize_factor": "",
+    "news_presenter_scale": 0.38,
+    "news_presenter_position": "bottom-right",
+    "news_presenter_margin": 0.04,
 }
 
 for _key, _value in _APP_DEFAULTS.items():

@@ -472,5 +472,222 @@ class TestPreview(unittest.TestCase):
             self.assertIn("proxy", report.note)
 
 
+class TestNewsStudio(unittest.TestCase):
+    def _scenes(self):
+        return [
+            scenes.Scene("Markets opened sharply higher this morning", 0.0, 4.0),
+            scenes.Scene("Tech stocks gained 12% over the quarter", 4.0, 4.0),
+        ]
+
+    def test_kicker_trims_word_safe_and_uppercases(self):
+        self.assertEqual(studio._kicker("hello brave new world"), "HELLO BRAVE NEW WORLD")
+        long = "an extremely long opening sentence that keeps going well past the plate"
+        kicked = studio._kicker(long)
+        self.assertLessEqual(len(kicked), 38)
+        self.assertEqual(kicked, kicked.upper())
+        self.assertFalse(kicked.endswith(" "))
+        # A single token longer than the plate is hard-sliced, not returned whole.
+        self.assertEqual(len(studio._kicker("x" * 80)), 38)
+
+    def test_compose_news_passes_contract_validation(self):
+        html = studio.compose_news(self._scenes(), "AI takeover", 1080, 1920, 8.0)
+        self.assertTrue(html)
+        ok, reason = author._validate(html, scene_count=2, total=8.0)
+        self.assertTrue(ok, reason)
+        # Persistent headline plate with the subject, one lower-third per scene.
+        self.assertIn("AI TAKEOVER", html)
+        self.assertIn('id="headline"', html)
+        self.assertIn('id="lt-0"', html)
+        self.assertIn('id="lt-1"', html)
+
+    def test_compose_news_with_backgrounds_validates_assets(self):
+        bgs = [Background(filename="assets/news1.jpg", description="city")]
+        html = studio.compose_news(self._scenes(), "econ", 1080, 1920, 8.0, backgrounds=bgs)
+        ok, reason = author._validate(html, 2, 8.0, ["news1.jpg"])
+        self.assertTrue(ok, reason)
+        self.assertIn('src="assets/news1.jpg"', html)
+
+    def test_compose_news_empty_inputs(self):
+        self.assertEqual(studio.compose_news([], "x", 1080, 1920, 8.0), "")
+        self.assertEqual(studio.compose_news(self._scenes(), "x", 1080, 1920, 0), "")
+
+    def test_author_news_rejects_invalid_and_does_not_fall_back(self):
+        with mock.patch.object(author.studio, "compose_news", return_value="<html>broken</html>"), \
+             mock.patch.object(author.llm, "_generate_response") as llm_call:
+            self.assertEqual(author.author_news(self._scenes(), "x", 1080, 1920), "")
+        llm_call.assert_not_called()
+
+    def test_author_news_accepts_studio_output(self):
+        html = author.author_news(self._scenes(), "econ", 1080, 1920)
+        self.assertIn('data-composition-id="main"', html)
+
+
+class TestOverlayPresenter(unittest.TestCase):
+    def _files(self, d, presenter_name="presenter.mp4"):
+        base = os.path.join(d, "base.mp4")
+        pres = os.path.join(d, presenter_name)
+        for p in (base, pres):
+            with open(p, "wb") as f:
+                f.write(b"x")
+        return base, pres
+
+    def test_missing_inputs_return_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            base, _ = self._files(d)
+            out = os.path.join(d, "out.mp4")
+            self.assertEqual(assemble.overlay_presenter("", base, out, 1080, 1920), "")
+            self.assertEqual(assemble.overlay_presenter(base, os.path.join(d, "nope.mp4"), out, 1080, 1920), "")
+
+    def test_overlay_runs_ffmpeg_and_returns_output(self):
+        with tempfile.TemporaryDirectory() as d:
+            base, pres = self._files(d)
+            out = os.path.join(d, "out.mp4")
+            captured = {}
+
+            def fake_run(cmd, **kwargs):
+                captured["cmd"] = cmd
+                with open(out, "wb") as f:
+                    f.write(b"video")
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(assemble.subprocess, "run", side_effect=fake_run):
+                result = assemble.overlay_presenter(base, pres, out, 1080, 1920)
+
+            self.assertEqual(result, out)
+            cmd = " ".join(captured["cmd"])
+            self.assertIn("overlay=x=main_w-overlay_w-", cmd)   # default bottom-right
+            self.assertIn("eof_action=pass", cmd)
+            self.assertIn("scale=410:-2", cmd)                  # 1080 * 0.38 -> even 410
+            self.assertNotIn("libvpx-vp9", cmd)                 # plain mp4 input
+
+    def test_webm_presenter_uses_alpha_decoder(self):
+        with tempfile.TemporaryDirectory() as d:
+            base, pres = self._files(d, presenter_name="presenter.webm")
+            out = os.path.join(d, "out.mp4")
+            captured = {}
+
+            def fake_run(cmd, **kwargs):
+                captured["cmd"] = cmd
+                with open(out, "wb") as f:
+                    f.write(b"video")
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(assemble.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(assemble.overlay_presenter(base, pres, out, 1080, 1920), out)
+            cmd = captured["cmd"]
+            # The decoder override must come before the presenter input.
+            self.assertLess(cmd.index("libvpx-vp9"), cmd.index(pres))
+
+    def test_ffmpeg_failure_returns_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            base, pres = self._files(d)
+            out = os.path.join(d, "out.mp4")
+            failed = types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            with mock.patch.object(assemble.subprocess, "run", return_value=failed):
+                self.assertEqual(assemble.overlay_presenter(base, pres, out, 1080, 1920), "")
+            self.assertFalse(os.path.exists(out))
+
+
+class TestNewsMode(unittest.TestCase):
+    """News mode = deterministic news track + optional presenter overlay.
+    Caption ranges: [] with a head (lower-thirds carry the words), the whole
+    video without one."""
+
+    def test_mode_recognizes_news(self):
+        params = types.SimpleNamespace(video_visual_mode="news")
+        self.assertEqual(hf.mode(params), "news")
+        with mock.patch.dict(hf.config.app, {"video_visual_mode": "news"}):
+            self.assertEqual(hf.mode(types.SimpleNamespace(video_visual_mode="")), "news")
+
+    def _params(self):
+        return types.SimpleNamespace(
+            video_aspect="portrait", video_subject="econ news",
+            video_source="pexels", n_threads=2, video_visual_mode="news",
+        )
+
+    def _run(self, presenter="", overlay=""):
+        scene_list = [scenes.Scene("s0", 0.0, 4.0), scenes.Scene("s1", 4.0, 4.0)]
+        with mock.patch.object(hf, "is_available", return_value=True), \
+             mock.patch.object(hf.scenes, "build_scenes", return_value=scene_list), \
+             mock.patch.object(hf.assets, "reset"), \
+             mock.patch.object(hf, "_solely_backgrounds", return_value=[]), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(hf.author, "author_news", return_value="<html>ok</html>"), \
+             mock.patch.object(hf.render, "render", return_value="news-base.mp4"), \
+             mock.patch.object(hf, "_news_presenter", return_value=presenter), \
+             mock.patch.object(hf.assemble, "overlay_presenter", return_value=overlay) as ov:
+            result = hf.render_news_video("task", self._params(), "script", "audio.mp3", "sub.srt", 8.0)
+        return result, ov
+
+    def test_presenter_success_suppresses_captions(self):
+        (out, ranges), ov = self._run(presenter="presenter.mp4", overlay="news.mp4")
+        self.assertEqual(out, "news.mp4")
+        self.assertEqual(ranges, [])
+        ov.assert_called_once()
+
+    def test_no_presenter_captions_whole_video(self):
+        (out, ranges), ov = self._run(presenter="")
+        self.assertEqual(out, "news-base.mp4")
+        self.assertEqual(ranges, [(0.0, 8.0)])
+        ov.assert_not_called()
+
+    def test_overlay_failure_degrades_to_headless_base(self):
+        (out, ranges), _ = self._run(presenter="presenter.mp4", overlay="")
+        self.assertEqual(out, "news-base.mp4")
+        self.assertEqual(ranges, [(0.0, 8.0)])
+
+    def test_unavailable_toolchain(self):
+        with mock.patch.object(hf, "is_available", return_value=False):
+            out, ranges = hf.render_news_video("task", self._params(), "s", "a.mp3", "s.srt", 8.0)
+        self.assertEqual((out, ranges), ("", []))
+
+    def test_composition_failure_falls_back(self):
+        scene_list = [scenes.Scene("s0", 0.0, 4.0)]
+        with mock.patch.object(hf, "is_available", return_value=True), \
+             mock.patch.object(hf.scenes, "build_scenes", return_value=scene_list), \
+             mock.patch.object(hf.assets, "reset"), \
+             mock.patch.object(hf, "_solely_backgrounds", return_value=[]), \
+             mock.patch.object(hf.author, "author_news", return_value=""):
+            out, ranges = hf.render_news_video("task", self._params(), "s", "a.mp3", "s.srt", 4.0)
+        self.assertEqual((out, ranges), ("", []))
+
+
+class TestNewsPresenter(unittest.TestCase):
+    def _params(self):
+        return types.SimpleNamespace(video_aspect="portrait")
+
+    def test_disabled_avatar_returns_empty(self):
+        from app.services import avatar
+        with mock.patch.object(avatar, "is_enabled", return_value=False):
+            self.assertEqual(hf._news_presenter("task", self._params(), "script", "a.mp3", 1080, 1920), "")
+
+    def test_requests_square_clip_and_returns_result(self):
+        from app.services import avatar
+        with mock.patch.object(avatar, "is_enabled", return_value=True), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(avatar, "synthesize", return_value="p.mp4") as syn:
+            result = hf._news_presenter("task", self._params(), "script", "a.mp3", 1080, 1920)
+        self.assertEqual(result, "p.mp4")
+        kwargs = syn.call_args.kwargs
+        self.assertEqual(kwargs["width"], 1080)
+        self.assertEqual(kwargs["height"], 1080)
+
+    def test_falls_back_to_wav2lip_with_audio(self):
+        from app.services import avatar
+        with tempfile.TemporaryDirectory() as d:
+            audio = os.path.join(d, "audio.mp3")
+            with open(audio, "wb") as f:
+                f.write(b"a")
+            w2l = mock.Mock()
+            w2l.synthesize.return_value = "w2l.mp4"
+            with mock.patch.object(avatar, "is_enabled", return_value=True), \
+                 mock.patch.object(hf.utils, "task_dir", return_value=d), \
+                 mock.patch.object(avatar, "synthesize", return_value=""), \
+                 mock.patch.object(avatar, "Wav2LipAvatar", return_value=w2l):
+                result = hf._news_presenter("task", self._params(), "script", audio, 1080, 1920)
+        self.assertEqual(result, "w2l.mp4")
+        self.assertEqual(w2l.synthesize.call_args.kwargs["script_or_audio"], audio)
+
+
 if __name__ == "__main__":
     unittest.main()
