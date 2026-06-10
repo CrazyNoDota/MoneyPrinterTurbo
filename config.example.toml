@@ -182,6 +182,41 @@ video_gen_max_seconds = 60    # hard cap on total generated seconds per video
 video_gen_timeout = 300       # seconds to wait for a single clip before giving up
 video_gen_poll_interval = 5   # seconds between status polls
 
+########## Talking head
+# Optional presenter video layer. Phase 1 only installs the provider module; the
+# main video compositor is wired in a later phase. All failures are non-fatal.
+#
+# provider:
+#   auto    -> Azure TTS Avatar first, then Wav2Lip fallback
+#   azure   -> Azure TTS Avatar batch API only
+#   wav2lip -> local audio+portrait lip sync only
+#
+# Azure uses the existing [azure].speech_key and [azure].speech_region values
+# below. Do not duplicate those credentials in this block.
+avatar_enabled = false
+avatar_provider = "auto"
+avatar_character = "lisa"              # Azure standard avatar catalog character
+avatar_style = "casual-sitting"        # Azure standard avatar style
+avatar_voice = "en-US-JennyNeural"     # used when synthesize() presenter is empty
+avatar_portrait = ""                   # portrait photo path for Wav2Lip/custom photo
+avatar_prefer_alpha = true             # use webm/vp9+transparent when confirmed available
+avatar_alpha_supported = false         # set true only in regions/accounts that support it
+avatar_fps = 25
+avatar_timeout = 900
+avatar_poll_interval = 5
+avatar_azure_api_version = "3.1-preview1"
+avatar_azure_endpoint = ""             # override full Azure endpoint only if needed
+
+# Wav2Lip fallback. Run setup-avatar.bat once to create .venv-wav2lip, clone the
+# reference Wav2Lip repo, and download wav2lip_gan.pth. Missing pieces simply
+# make the provider return "".
+wav2lip_python = ""                    # override .venv-wav2lip interpreter
+wav2lip_repo = ""                      # override .wav2lip/Wav2Lip
+wav2lip_script = ""                    # override inference.py
+wav2lip_weights = ""                   # override models/wav2lip/wav2lip_gan.pth
+wav2lip_timeout = 1800
+wav2lip_resize_factor = ""
+
 ########## Hyperframes (motion-graphics video)
 # Build the whole video from motion graphics instead of stock footage: an LLM
 # authors an HTML/GSAP composition (kinetic typography, animated numbers/lists)

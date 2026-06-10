@@ -7,6 +7,32 @@ from app.config import config
 from app.utils import utils
 
 
+_APP_DEFAULTS = {
+    "avatar_enabled": False,
+    "avatar_provider": "auto",
+    "avatar_character": "lisa",
+    "avatar_style": "casual-sitting",
+    "avatar_voice": "en-US-JennyNeural",
+    "avatar_portrait": "",
+    "avatar_prefer_alpha": True,
+    "avatar_alpha_supported": False,
+    "avatar_fps": 25,
+    "avatar_timeout": 900,
+    "avatar_poll_interval": 5,
+    "avatar_azure_api_version": "3.1-preview1",
+    "avatar_azure_endpoint": "",
+    "wav2lip_python": "",
+    "wav2lip_repo": "",
+    "wav2lip_script": "",
+    "wav2lip_weights": "",
+    "wav2lip_timeout": 1800,
+    "wav2lip_resize_factor": "",
+}
+
+for _key, _value in _APP_DEFAULTS.items():
+    config.app.setdefault(_key, _value)
+
+
 def __init_logger():
     # _log_file = utils.storage_dir("logs/server.log")
     _lvl = config.log_level
