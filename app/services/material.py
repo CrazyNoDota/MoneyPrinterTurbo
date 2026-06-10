@@ -264,8 +264,11 @@ def search_images_pexels(
         items = []
         for p in response.get("photos", []):
             src = p.get("src", {}) or {}
-            # Prefer a large rendition; fall back through what Pexels returns.
-            url = src.get("large2x") or src.get("original") or src.get("large")
+            # Prefer the full-resolution original: the resized renditions
+            # (large2x = h*2 <= ~1300px tall for portrait shots) never clear a
+            # full-bleed 1080x1920 minimum, which silently starved portrait
+            # videos of every background photo.
+            url = src.get("original") or src.get("large2x") or src.get("large")
             if not url:
                 continue
             item = MaterialInfo()
