@@ -26,6 +26,31 @@
 
 </div>
 
+## One-click install (Windows)
+
+On Windows 11 you can set everything up with a single command and then run the
+whole thing from Telegram — no web UI, no terminal.
+
+1. Install the two prerequisites: **Python 3.11+** (https://www.python.org/downloads/windows/)
+   and **Node.js 22+** (https://nodejs.org).
+2. Double-click **`install.bat`** in the project root (or run it once from a terminal).
+   It builds the `.venv`, installs the app and the motion-graphics toolchain,
+   optionally adds local Russian TTS and the Wav2Lip avatar fallback, creates
+   `config.toml`, asks for your Telegram bot token (from
+   [@BotFather](https://t.me/BotFather)), and registers the bot to **autostart at
+   logon** via Task Scheduler. It is safe to re-run — completed steps are skipped.
+
+Once it is up, control everything from Telegram:
+
+- **`/make <topic>`** — generate a video on any topic
+- **`/news`** — turn the latest news into a video
+- **`/status`** — check what the bot is working on
+- send **photos / videos** to add your own materials to the next render
+
+The bot runs as a background worker (`run-bot.bat`, with an auto-restart loop)
+and comes back online by itself after a reboot. Logs land in
+`storage\logs\bot.log`.
+
 ## 功能特性 🎯
 
 - [x] 完整的 **MVC架构**，代码 **结构清晰**，易于维护，支持 `API` 和 `Web界面`
