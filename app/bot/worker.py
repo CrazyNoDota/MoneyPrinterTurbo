@@ -10,6 +10,7 @@ import time
 from loguru import logger
 
 from app.bot.api import TelegramAPI
+from app.bot.autopilot import Autopilot
 from app.bot.jobs import JobQueue
 from app.bot.router import Router
 from app.utils import utils
@@ -50,6 +51,11 @@ def run(api: TelegramAPI = None, jobs: JobQueue = None, router: Router = None,
     jobs.start()
     router = router or Router(api, jobs)
     logger.info("telegram bot worker started (long polling)")
+
+    # Optional scheduled news->video->Telegram cycle (Phase 8 autonomy).
+    autopilot = Autopilot.from_config(jobs)
+    if autopilot:
+        autopilot.start()
 
     # Persisted across restarts so already-handled updates are not redelivered
     # (a replayed /make would silently burn a whole render's compute/credits).

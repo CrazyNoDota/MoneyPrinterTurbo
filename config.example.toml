@@ -490,6 +490,14 @@ voice_name = ""                        # "" = let the language switch pick
 video_source = "pexels"
 paragraph_number = 1
 timeout = 30                           # Bot API request timeout, seconds
+# Autopilot: scheduled news -> video -> Telegram with no manual step.
+# Renders the freshest unseen news item every N hours, once per language,
+# and delivers the mp4s to autopilot_chat_id. Off by default (renders cost
+# compute/credits).
+autopilot_enabled = false
+autopilot_chat_id = ""                 # chat that receives the scheduled videos
+autopilot_interval_hours = 6
+autopilot_languages = ["ru", "en"]     # one render per language per news item
 
 [ui]
 # UI related settings

@@ -28,6 +28,7 @@ class Job:
     kind: str  # "make" | "news"
     topic: str = ""
     news_item: object = None  # NewsItem for kind == "news"
+    language: str = ""  # "" = the [telegram].language default
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
@@ -38,7 +39,7 @@ def _build_params(job: Job) -> Optional[VideoParams]:
     never in the poll loop -- and the fetched item is pinned onto the job so
     the status label can show the headline.
     """
-    language = str(config.telegram.get("language", "") or "")
+    language = job.language or str(config.telegram.get("language", "") or "")
     subject = job.topic
     script = ""
     if job.kind == "news":

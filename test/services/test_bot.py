@@ -311,5 +311,92 @@ class TestWorkerLoop(unittest.TestCase):
         self.assertEqual(api.get_updates.call_args.kwargs["offset"], 100)
 
 
+class TestAutopilot(unittest.TestCase):
+    def _item(self, title="Big news", item_id="abc123"):
+        return SimpleNamespace(title=title, id=item_id)
+
+    def _autopilot(self, d, languages=("ru", "en")):
+        from app.bot import autopilot as ap
+
+        jobs = mock.Mock()
+        with mock.patch.object(ap, "_seen_file",
+                               return_value=str(Path(d) / "seen.txt")):
+            pilot = ap.Autopilot(jobs, chat_id="99", languages=list(languages),
+                                 interval_hours=6)
+        return ap, pilot, jobs
+
+    def test_from_config_disabled_returns_none(self):
+        from app.bot import autopilot as ap
+
+        with mock.patch.dict(ap.config.telegram, {"autopilot_enabled": False}):
+            self.assertIsNone(ap.Autopilot.from_config(mock.Mock()))
+
+    def test_from_config_requires_chat_id(self):
+        from app.bot import autopilot as ap
+
+        with mock.patch.dict(
+            ap.config.telegram,
+            {"autopilot_enabled": True, "autopilot_chat_id": ""},
+        ):
+            self.assertIsNone(ap.Autopilot.from_config(mock.Mock()))
+
+    def test_tick_queues_one_job_per_language(self):
+        import tempfile
+
+        from app.services import news
+
+        with tempfile.TemporaryDirectory() as d:
+            ap, pilot, jobs = self._autopilot(d)
+            with mock.patch.object(ap, "_seen_file",
+                                   return_value=str(Path(d) / "seen.txt")), \
+                 mock.patch.object(news, "latest", return_value=[self._item()]):
+                queued = pilot.tick()
+        self.assertEqual(queued, 2)
+        langs = [c.args[0].language for c in jobs.submit.call_args_list]
+        self.assertEqual(langs, ["ru", "en"])
+        job = jobs.submit.call_args_list[0].args[0]
+        self.assertEqual(job.kind, "news")
+        self.assertEqual(job.chat_id, "99")
+        self.assertEqual(job.topic, "Big news")
+
+    def test_tick_dedupes_seen_item_across_instances(self):
+        import tempfile
+
+        from app.services import news
+
+        with tempfile.TemporaryDirectory() as d:
+            ap, pilot, jobs = self._autopilot(d)
+            seen = str(Path(d) / "seen.txt")
+            with mock.patch.object(ap, "_seen_file", return_value=seen), \
+                 mock.patch.object(news, "latest", return_value=[self._item()]):
+                self.assertEqual(pilot.tick(), 2)
+                self.assertEqual(pilot.tick(), 0)  # same item, same instance
+                # A fresh instance (restart) must load the persisted ids.
+                _, pilot2, jobs2 = self._autopilot(d)
+                with mock.patch.object(ap, "_seen_file", return_value=seen):
+                    self.assertEqual(pilot2.tick(), 0)
+            jobs2.submit.assert_not_called()
+
+    def test_tick_no_news_is_quiet(self):
+        import tempfile
+
+        from app.services import news
+
+        with tempfile.TemporaryDirectory() as d:
+            ap, pilot, jobs = self._autopilot(d)
+            with mock.patch.object(news, "latest", return_value=[]):
+                self.assertEqual(pilot.tick(), 0)
+        jobs.submit.assert_not_called()
+
+    def test_job_language_overrides_config_default(self):
+        with mock.patch.dict(
+            bot_jobs.config.telegram, {"language": "ru", "voice_name": ""}
+        ):
+            params = bot_jobs._build_params(
+                Job(chat_id=1, kind="make", topic="space", language="en")
+            )
+        self.assertEqual(params.video_language, "en")
+
+
 if __name__ == "__main__":
     unittest.main()
