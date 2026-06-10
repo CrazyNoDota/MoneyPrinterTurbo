@@ -672,6 +672,42 @@ class TestNewsPresenter(unittest.TestCase):
         self.assertEqual(kwargs["width"], 1080)
         self.assertEqual(kwargs["height"], 1080)
 
+    def test_follows_pipeline_voice_when_avatar_voice_unset(self):
+        from app.services import avatar
+        params = types.SimpleNamespace(
+            video_aspect="portrait", voice_name="ru-RU-DmitryNeural-V2-Male"
+        )
+        with mock.patch.dict(hf.config.app, {"avatar_voice": ""}), \
+             mock.patch.object(avatar, "is_enabled", return_value=True), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(avatar, "synthesize", return_value="p.mp4") as syn:
+            hf._news_presenter("task", params, "script", "a.mp3", 1080, 1920)
+        self.assertEqual(syn.call_args.kwargs["presenter"], "ru-RU-DmitryNeural")
+
+    def test_explicit_avatar_voice_wins_over_pipeline_voice(self):
+        from app.services import avatar
+        params = types.SimpleNamespace(
+            video_aspect="portrait", voice_name="ru-RU-DmitryNeural-V2-Male"
+        )
+        with mock.patch.dict(hf.config.app, {"avatar_voice": "en-US-JennyNeural"}), \
+             mock.patch.object(avatar, "is_enabled", return_value=True), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(avatar, "synthesize", return_value="p.mp4") as syn:
+            hf._news_presenter("task", params, "script", "a.mp3", 1080, 1920)
+        self.assertEqual(syn.call_args.kwargs["presenter"], "en-US-JennyNeural")
+
+    def test_non_azure_pipeline_voice_leaves_provider_default(self):
+        from app.services import avatar
+        params = types.SimpleNamespace(
+            video_aspect="portrait", voice_name="qwen:Russian:ryan"
+        )
+        with mock.patch.dict(hf.config.app, {"avatar_voice": ""}), \
+             mock.patch.object(avatar, "is_enabled", return_value=True), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(avatar, "synthesize", return_value="p.mp4") as syn:
+            hf._news_presenter("task", params, "script", "a.mp3", 1080, 1920)
+        self.assertEqual(syn.call_args.kwargs["presenter"], "")
+
     def test_falls_back_to_wav2lip_with_audio(self):
         from app.services import avatar
         with tempfile.TemporaryDirectory() as d:

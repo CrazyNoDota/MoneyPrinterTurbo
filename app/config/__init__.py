@@ -12,7 +12,7 @@ _APP_DEFAULTS = {
     "avatar_provider": "auto",
     "avatar_character": "lisa",
     "avatar_style": "casual-sitting",
-    "avatar_voice": "en-US-JennyNeural",
+    "avatar_voice": "",  # "" -> follow the pipeline TTS voice (news mode lip sync)
     "avatar_portrait": "",
     "avatar_prefer_alpha": True,
     "avatar_alpha_supported": False,
@@ -30,6 +30,10 @@ _APP_DEFAULTS = {
     "news_presenter_scale": 0.38,
     "news_presenter_position": "bottom-right",
     "news_presenter_margin": 0.04,
+    "voice_ru_primary": "ru-RU-DmitryNeural-V2-Male",
+    "voice_ru_fallback": "qwen:Russian:ryan-Male",
+    "voice_en_primary": "en-US-AndrewMultilingualNeural-V2-Male",
+    "voice_en_fallback": "en-US-AndrewNeural-Male",
 }
 
 for _key, _value in _APP_DEFAULTS.items():

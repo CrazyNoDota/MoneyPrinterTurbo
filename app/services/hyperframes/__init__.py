@@ -211,6 +211,13 @@ def _news_presenter(task_id, params, video_script, audio_file, width, height) ->
     # portrait would scale into a towering overlay.
     side = min(int(width or 1080), int(height or 1920))
     voice = str(config.app.get("avatar_voice", "") or "")
+    if not voice:
+        # Follow the pipeline TTS voice (generate_audio records the voice it
+        # actually used back onto params) so the avatar's lips track the
+        # narration. Non-Azure voices (qwen:, silero:) yield "" -> provider default.
+        from app.services import voice as voice_service
+
+        voice = voice_service.azure_voice_basename(getattr(params, "voice_name", ""))
     use_alpha = bool(config.app.get("avatar_prefer_alpha", True)) and bool(
         config.app.get("avatar_alpha_supported", False)
     )

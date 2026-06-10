@@ -312,12 +312,29 @@ def generate_audio(task_id, params, video_script):
                 logger.info("resuming: reusing existing audio.mp3 (skipping TTS)")
                 return audio_file, reused_duration, None
             logger.warning("existing audio.mp3 had zero duration; regenerating")
-        sub_maker = voice.tts(
-            text=video_script,
-            voice_name=voice.parse_voice_name(params.voice_name),
-            voice_rate=params.voice_rate,
-            voice_file=audio_file,
+        # RU/EN language switch: an ordered voice chain (Azure Neural primary,
+        # local/free fallback). Without a recognized language this is exactly
+        # the single configured voice, i.e. legacy behavior.
+        candidates = voice.voice_candidates(
+            language=params.video_language, voice_name=params.voice_name
         )
+        sub_maker = None
+        for index, candidate in enumerate(candidates):
+            if index > 0:
+                logger.warning(f"TTS failed; falling back to voice: {candidate}")
+            sub_maker = voice.tts(
+                text=video_script,
+                voice_name=candidate,
+                voice_rate=params.voice_rate,
+                voice_file=audio_file,
+            )
+            if sub_maker is not None:
+                # Record the voice actually used so downstream consumers (the
+                # news-mode avatar) can match it -- lips track the narration.
+                # Note: script.json (saved earlier) keeps the *requested* voice,
+                # and the resume path above returns before this line.
+                params.voice_name = candidate
+                break
         if sub_maker is None:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             logger.error(

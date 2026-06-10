@@ -80,7 +80,11 @@ class AzureAvatar(TalkingHead):
             properties["backgroundColor"] = "transparent"
 
         return {
-            "synthesisConfig": {"voice": voice or str(_cfg("avatar_voice", _DEFAULT_VOICE))},
+            # avatar_voice defaults to "" (= follow the pipeline voice, resolved
+            # by the caller); an avatar invoked directly still needs a real one.
+            "synthesisConfig": {
+                "voice": voice or str(_cfg("avatar_voice", "") or "") or _DEFAULT_VOICE
+            },
             "inputKind": "SSML" if is_ssml else "PlainText",
             "inputs": [{"content": text}],
             "properties": properties,
