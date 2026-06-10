@@ -475,6 +475,22 @@ speech_region = ""
 # Get your API key at https://siliconflow.cn
 api_key = ""
 
+[telegram]
+# Product Telegram bot (start with: python -m app.bot).
+# Create a NEW bot with @BotFather and put its token here (or set
+# TELEGRAM_BOT_TOKEN in .env) -- never reuse a token that belongs to other
+# tooling. Keep the token out of version control.
+bot_token = ""
+# Deny-by-default: only these chat ids may use the bot (renders cost compute
+# and API credits). Message the bot once -- it replies with your chat id.
+allowed_chats = []                     # e.g. ["272967534"]
+# Defaults for bot-triggered renders
+language = ""                          # "ru"/"en" drives the voice switch; "" = auto
+voice_name = ""                        # "" = let the language switch pick
+video_source = "pexels"
+paragraph_number = 1
+timeout = 30                           # Bot API request timeout, seconds
+
 [ui]
 # UI related settings
 # 是否隐藏日志信息
