@@ -66,11 +66,12 @@ def _poll_until_done(gen: VideoGenerator, job: str) -> str:
     return ""
 
 
-def _download(url: str, dest: str) -> str:
+def _download(url: str, dest: str, headers: dict = None) -> str:
     """Download a finished clip to ``dest`` (with retry). Returns dest or ''."""
     resp = call_with_retry(
         requests.get,
         url,
+        headers=headers or {},
         proxies=config.proxy,
         timeout=(60, 240),
         description="videogen.download",
@@ -100,7 +101,7 @@ def _generate_one(gen: VideoGenerator, spec: ClipSpec) -> str:
 
     save_dir = utils.storage_dir(os.path.join("cache", _CACHE_NS), create=True)
     dest = os.path.join(save_dir, f"gen-{key}.mp4")
-    local = _download(url, dest)
+    local = _download(url, dest, headers=gen.download_headers())
     if local:
         cache.set(_CACHE_NS, key, local)
         logger.success(f"videogen produced {os.path.basename(local)}")

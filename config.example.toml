@@ -168,6 +168,10 @@ resume = true
 #   fal       -> fal.ai queue API        (set video_gen_api_key + video_gen_model=<route e.g. fal-ai/ltx-video>)
 #   http      -> your own GPU service (Google Cloud Run+GPU / Modal / RunPod);
 #                set video_gen_endpoint to a server exposing POST /submit + GET /status/{job}
+#   azure-sora-> Azure OpenAI Sora (runs on the startup credits). Set
+#                video_gen_endpoint = "https://<resource>.openai.azure.com" and
+#                video_gen_api_key; video_gen_model defaults to "sora".
+#                ⚠️ Azure sunsets this API on 2026-09-24 -- after that switch back to null.
 # mode: image2video animates the on-theme photos we already fetch (cheaper, more
 #       coherent); text2video generates from the search terms. image2video is used
 #       automatically whenever an init image is available.

@@ -7,7 +7,7 @@ configured, which the orchestrator treats as "disabled" and falls back to stock
 footage.
 
 Config is read from ``config.app``:
-    video_gen_provider   null | replicate | fal | http
+    video_gen_provider   null | replicate | fal | http | azure-sora
     video_gen_api_key    credential for the hosted provider
     video_gen_model      model id / version (provider specific)
     video_gen_endpoint   base URL for the self-hosted ``http`` provider
@@ -271,11 +271,21 @@ class HttpVideoGenerator(VideoGenerator):
         return STATUS_PENDING, ""
 
 
+def _azure_sora():
+    # A factory (build_provider just calls the mapped value): imported lazily
+    # so this module stays importable if the file is trimmed after the Azure
+    # Sora API sunset (2026-09-24).
+    from .azure_sora import AzureSoraVideoGenerator
+
+    return AzureSoraVideoGenerator()
+
+
 _PROVIDERS = {
     "null": NullVideoGenerator,
     "replicate": ReplicateVideoGenerator,
     "fal": FalVideoGenerator,
     "http": HttpVideoGenerator,
+    "azure-sora": _azure_sora,
 }
 
 
