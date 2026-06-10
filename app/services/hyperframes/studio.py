@@ -21,11 +21,12 @@ is validated against.
 
 import html as _html
 import re
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 from loguru import logger
 
+from . import fonts
 from .scenes import Scene
 
 # GSAP, pinned to match the freeform contract / .hyperframes runtime.
@@ -53,7 +54,7 @@ class SceneSpec:
     """One scene mapped onto an archetype with its rendered content."""
 
     scene: Scene
-    archetype: str  # "stat" | "statement"
+    archetype: str  # "stat" | "statement" | "quote" | "list" | "comparison" | "chart"
     caption: str
     value: str = ""            # rendered hero string, e.g. "78%" or "$2.4B"
     number: Optional[float] = None  # numeric target for the count-up, if any
@@ -61,10 +62,29 @@ class SceneSpec:
     suffix: str = ""
     decimals: int = 0
     background: Optional[object] = None  # a Background, or None
+    items: List[str] = field(default_factory=list)  # list / comparison entries
+    attr: str = ""             # quote attribution ("" = none)
+    bars: List[Tuple[str, float]] = field(default_factory=list)  # chart (label, pct)
 
 
 def _esc(text: str) -> str:
     return _html.escape((text or "").strip())
+
+
+def _fill_css(template: str, width: int, height: int) -> str:
+    """Resolve the CSS template: dimensions, accent, embedded font faces.
+
+    ``stage_fonts`` copies the bundled Anton/Oswald files into the project's
+    assets dir and returns their @font-face rules; on any failure it returns
+    ``""`` and the family stack degrades to the system fallbacks.
+    """
+    return (
+        template.replace("__W__", str(width))
+        .replace("__H__", str(height))
+        .replace("__ACCENT__", _ACCENT)
+        .replace("__FONTS__", fonts.stage_fonts())
+        .replace("__FAMILY__", fonts.FAMILY)
+    )
 
 
 def _asset_name(b) -> str:
@@ -113,13 +133,128 @@ def _extract_hero(text: str):
     return best
 
 
+# --- archetype detectors (conservative: when unsure, fall back to stat/statement)
+
+# Opening/closing quote characters around a quoted line, optional attribution
+# after a dash: «Цитата» — Имя  /  "Quote" - Name.
+_QUOTE_RE = re.compile(
+    r'^\s*[«"“„‘\']\s*(?P<q>.{8,220}?)\s*[»"”“’\']'
+    r"\s*(?:[—–-]\s*(?P<attr>.{2,48}))?\s*[.!]?\s*$",
+    re.DOTALL,
+)
+
+# " vs " / " против " between two short halves -> a comparison scene.
+_VS_RE = re.compile(r"\s+(?:vs\.?|versus|против)\s+", re.IGNORECASE)
+
+# "1. item 2. item" / "1) item 2) item" enumeration markers.
+_ENUM_RE = re.compile(r"(?:(?<=^)|(?<=[\s:;,—–-]))(\d{1,2})[.)]\s+")
+
+_ITEM_MAX = 64  # an entry longer than this reads as prose, not a list row
+
+
+def _match_quote(text: str) -> Optional[Tuple[str, str]]:
+    """``(quote, attribution)`` when the whole scene is one quoted line."""
+    m = _QUOTE_RE.match(text or "")
+    if not m:
+        return None
+    return m.group("q").strip(), (m.group("attr") or "").strip()
+
+
+def _match_comparison(text: str) -> Optional[List[str]]:
+    """``[left, right]`` when the scene is two short halves around a "vs"."""
+    parts = _VS_RE.split(text or "", maxsplit=1)
+    if len(parts) != 2:
+        return None
+    left, right = (p.strip(" \t,.;:!") for p in parts)
+    if not left or not right:
+        return None
+    if len(left) > _ITEM_MAX or len(right) > _ITEM_MAX:
+        return None
+    return [left, right]
+
+
+def _match_list(text: str) -> Optional[Tuple[str, List[str]]]:
+    """``(title, items)`` for an enumerated/semicolon scene; title may be ""."""
+    text = (text or "").strip()
+    markers = _ENUM_RE.findall(text)
+    if len(markers) >= 2:
+        chunks = _ENUM_RE.split(text)
+        # split() yields [lead-in, num, item, num, item, ...]
+        title = chunks[0].strip(" \t,.;:—–-")
+        items = [c.strip(" \t,.;:") for c in chunks[2::2]]
+        items = [i for i in items if i]
+        if 2 <= len(items) <= 5 and all(len(i) <= _ITEM_MAX for i in items):
+            return (title if len(title) <= _ITEM_MAX else ""), items
+        return None
+    if text.count(";") >= 2:
+        items = [p.strip(" \t,.;:") for p in text.split(";")]
+        items = [i for i in items if i]
+        if 3 <= len(items) <= 5 and all(len(i) <= _ITEM_MAX for i in items):
+            return "", items
+    return None
+
+
+def _match_chart(text: str) -> Optional[List[Tuple[str, float]]]:
+    """``[(label, percent), ...]`` when the scene compares 2+ percentages.
+
+    Labels are the few words right before each number ("онлайн 78%, офлайн 22%"
+    -> [("онлайн", 78), ("офлайн", 22)]); a missing label shows the value alone.
+    """
+    bars: List[Tuple[str, float]] = []
+    last_end = 0
+    for m in _HERO_NUM.finditer(text or ""):
+        suffix = (m.group("suffix") or "").lower()
+        if suffix not in ("%", "percent"):
+            continue
+        try:
+            value = float(m.group("num").replace(",", ""))
+        except ValueError:
+            continue
+        if not 0 < value <= 100:
+            continue
+        lead = text[last_end:m.start()].strip(" \t,.;:—–-")
+        label = " ".join(lead.split()[-3:])[:24]
+        bars.append((label, value))
+        last_end = m.end()
+    if 2 <= len(bars) <= 4:
+        return bars
+    return None
+
+
 def build_specs(scenes: List[Scene], backgrounds=None) -> List[SceneSpec]:
     """Classify every scene into an archetype and attach a rotating background."""
     bgs = list(backgrounds or [])
     specs: List[SceneSpec] = []
     for i, s in enumerate(scenes):
-        hero = _extract_hero(s.text)
         bg = bgs[i % len(bgs)] if bgs else None
+        quote = _match_quote(s.text)
+        if quote:
+            q, attr = quote
+            specs.append(SceneSpec(
+                scene=s, archetype="quote", caption=q, attr=attr, background=bg,
+            ))
+            continue
+        comparison = _match_comparison(s.text)
+        if comparison:
+            specs.append(SceneSpec(
+                scene=s, archetype="comparison", caption=s.text,
+                items=comparison, background=bg,
+            ))
+            continue
+        listed = _match_list(s.text)
+        if listed:
+            title, items = listed
+            specs.append(SceneSpec(
+                scene=s, archetype="list", caption=title, items=items, background=bg,
+            ))
+            continue
+        bars = _match_chart(s.text)
+        if bars:
+            specs.append(SceneSpec(
+                scene=s, archetype="chart", caption=s.text, bars=bars, background=bg,
+            ))
+            continue
+        hero = _extract_hero(s.text)
         if hero:
             value, number, prefix, suffix, decimals, _ = hero
             specs.append(SceneSpec(
@@ -135,9 +270,10 @@ def build_specs(scenes: List[Scene], backgrounds=None) -> List[SceneSpec]:
 
 
 _CSS = """
+__FONTS__
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { width:__W__px; height:__H__px; overflow:hidden;
-  background:#020617; font-family:'Arial Black','Helvetica Neue Bold',Impact,system-ui,sans-serif; }
+  background:#020617; font-family:__FAMILY__; font-weight:700; }
 #root { position:relative; width:__W__px; height:__H__px; }
 .clip { position:absolute; inset:0; }
 .bg-base { background:linear-gradient(160deg,#0f172a 0%,#020617 70%,#000 100%); }
@@ -152,6 +288,41 @@ html, body { width:__W__px; height:__H__px; overflow:hidden;
 .headline { color:#fff; font-size:clamp(52px,9vw,128px); line-height:1.08;
   letter-spacing:-.01em; max-width:90%; text-shadow:0 4px 22px rgba(0,0,0,.7); }
 .headline .line { display:block; }
+.quote-mark { color:__ACCENT__; font-size:clamp(120px,22vw,300px); line-height:.6;
+  height:.45em; }
+.quote-text { color:#fff; font-size:clamp(44px,7.6vw,104px); line-height:1.16;
+  max-width:88%; text-shadow:0 3px 18px rgba(0,0,0,.7); }
+.quote-attr { color:__ACCENT__; font-size:clamp(28px,4.2vw,56px);
+  letter-spacing:.12em; text-transform:uppercase; }
+.list-title { color:__ACCENT__; font-size:clamp(34px,5vw,68px);
+  letter-spacing:.1em; text-transform:uppercase; margin-bottom:1vh; }
+.list-item { display:flex; align-items:center; gap:.55em; max-width:90%;
+  text-align:left; }
+.list-idx { flex:0 0 auto; display:flex; align-items:center; justify-content:center;
+  width:1.5em; height:1.5em; border-radius:8px; background:__ACCENT__; color:#020617;
+  font-size:clamp(30px,4.6vw,60px); }
+.list-txt { color:#fff; font-size:clamp(34px,5.4vw,72px); line-height:1.14;
+  text-shadow:0 3px 16px rgba(0,0,0,.7); }
+.vs-row { display:flex; align-items:stretch; justify-content:center; gap:3%;
+  width:100%; }
+.vs-side { flex:1 1 0; display:flex; align-items:center; justify-content:center;
+  padding:5% 4%; border-radius:14px; background:rgba(15,23,42,.78);
+  box-shadow:0 10px 36px rgba(0,0,0,.45); color:#fff;
+  font-size:clamp(34px,5.2vw,72px); line-height:1.14; }
+.vs-badge { align-self:center; flex:0 0 auto; padding:.3em .5em; border-radius:10px;
+  background:__ACCENT__; color:#020617; font-size:clamp(30px,4.6vw,60px);
+  letter-spacing:.06em; }
+.chart-caption { color:#fff; font-size:clamp(34px,5.2vw,68px); line-height:1.14;
+  max-width:88%; text-shadow:0 3px 16px rgba(0,0,0,.7); margin-bottom:1.4vh; }
+.chart-row { display:flex; flex-direction:column; align-items:flex-start; gap:.7vh;
+  width:84%; }
+.bar-head { display:flex; justify-content:space-between; width:100%; color:#fff;
+  font-size:clamp(26px,3.8vw,50px); }
+.bar-pct { color:__ACCENT__; }
+.bar-track { width:100%; height:clamp(20px,2.6vw,34px); border-radius:999px;
+  background:rgba(148,163,184,.25); overflow:hidden; }
+.bar-fill { height:100%; border-radius:999px; background:__ACCENT__;
+  transform-origin:left center; will-change:transform; }
 .line, .stat-value, .stat-caption { will-change:transform,opacity; }
 """
 
@@ -174,24 +345,72 @@ def _scene_html(spec: SceneSpec, idx: int) -> str:
                 f'data-track-index="2"></div>'
             )
 
-    if spec.archetype == "stat":
-        body = (
-            f'<div id="val-{idx}" class="line stat-value">{_esc(spec.prefix)}0'
-            f'{_esc(spec.suffix)}</div>'
-            f'<div class="line stat-caption">{_esc(spec.caption)}</div>'
-        )
-    else:
-        body = (
-            '<div class="headline">'
-            + "".join(f'<span class="line">{_esc(w)}</span>' for w in _wrap_lines(spec.caption))
-            + "</div>"
-        )
+    body = _scene_body(spec, idx)
 
     parts.append(
         f'<div id="scene-{idx}" class="clip col" data-start="{start}" '
         f'data-duration="{dur}" data-track-index="3">{body}</div>'
     )
     return "\n    ".join(parts)
+
+
+def _scene_body(spec: SceneSpec, idx: int) -> str:
+    """The children of a scene's single centered column, per archetype.
+
+    Every archetype stays inside that one flex column with stacked children, so
+    the no-overlap guarantee of the original layout extends to all of them.
+    """
+    if spec.archetype == "stat":
+        return (
+            f'<div id="val-{idx}" class="line stat-value">{_esc(spec.prefix)}0'
+            f'{_esc(spec.suffix)}</div>'
+            f'<div class="line stat-caption">{_esc(spec.caption)}</div>'
+        )
+    if spec.archetype == "quote":
+        attr = f'<div class="line quote-attr">— {_esc(spec.attr)}</div>' if spec.attr else ""
+        return (
+            '<div class="line quote-mark">“</div>'
+            f'<div class="line quote-text">{_esc(spec.caption)}</div>'
+            + attr
+        )
+    if spec.archetype == "list":
+        title = f'<div class="line list-title">{_esc(spec.caption)}</div>' if spec.caption else ""
+        rows = "".join(
+            f'<div class="line list-item"><span class="list-idx">{n}</span>'
+            f'<span class="list-txt">{_esc(item)}</span></div>'
+            for n, item in enumerate(spec.items, start=1)
+        )
+        return title + rows
+    if spec.archetype == "comparison":
+        left, right = spec.items[0], spec.items[1]
+        return (
+            f'<div class="line vs-row">'
+            f'<div class="vs-side vs-left">{_esc(left)}</div>'
+            f'<div class="vs-badge">VS</div>'
+            f'<div class="vs-side vs-right">{_esc(right)}</div>'
+            f'</div>'
+        )
+    if spec.archetype == "chart":
+        rows = []
+        for n, (label, value) in enumerate(spec.bars):
+            pct = round(value, 1)
+            pct_str = f"{pct:g}%"
+            rows.append(
+                f'<div class="line chart-row">'
+                f'<div class="bar-head"><span>{_esc(label) or "&nbsp;"}</span>'
+                f'<span class="bar-pct">{pct_str}</span></div>'
+                f'<div class="bar-track"><div class="bar-fill" '
+                f'style="width:{pct:g}%"></div></div></div>'
+            )
+        return (
+            f'<div class="line chart-caption">{_esc(spec.caption)}</div>'
+            + "".join(rows)
+        )
+    return (
+        '<div class="headline">'
+        + "".join(f'<span class="line">{_esc(w)}</span>' for w in _wrap_lines(spec.caption))
+        + "</div>"
+    )
 
 
 def _wrap_lines(text: str, max_chars: int = 22) -> List[str]:
@@ -241,6 +460,31 @@ def _scene_tweens(spec: SceneSpec, idx: int) -> str:
             f'document.getElementById("val-{idx}").textContent='
             f'"{_js(spec.prefix)}"+({fmt})+"{_js(spec.suffix)}";}}}},{round(start + 0.12, 3)});'
         )
+    elif spec.archetype == "comparison":
+        # The halves converge from opposite sides; the VS badge pops between them.
+        js.append(
+            f'tl.fromTo("#scene-{idx} .vs-left",{{x:-56}},'
+            f'{{x:0,duration:0.55,ease:"power3.out"}},{round(start + 0.08, 3)});'
+        )
+        js.append(
+            f'tl.fromTo("#scene-{idx} .vs-right",{{x:56}},'
+            f'{{x:0,duration:0.55,ease:"power3.out"}},{round(start + 0.08, 3)});'
+        )
+        js.append(
+            f'tl.fromTo("#scene-{idx} .vs-badge",{{scale:0.4}},'
+            f'{{scale:1,duration:0.45,ease:"back.out(2)"}},{round(start + 0.3, 3)});'
+        )
+    elif spec.archetype == "chart":
+        # Bars grow to their inline width (scaleX keeps the layout static).
+        js.append(
+            f'tl.fromTo("#scene-{idx} .bar-fill",{{scaleX:0}},'
+            f'{{scaleX:1,duration:0.8,stagger:0.12,ease:"power2.out"}},{round(start + 0.25, 3)});'
+        )
+    elif spec.archetype == "quote":
+        js.append(
+            f'tl.fromTo("#scene-{idx} .quote-mark",{{scale:0.5}},'
+            f'{{scale:1,duration:0.5,ease:"back.out(1.7)"}},{round(start + 0.08, 3)});'
+        )
     # Exit (fade + slight lift) so nothing lingers into the next scene.
     js.append(
         f'tl.to("#scene-{idx}",{{autoAlpha:0,y:-28,duration:0.4,ease:"power2.in"}},{exit_at});'
@@ -259,9 +503,10 @@ def _js(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 _NEWS_CSS = """
+__FONTS__
 * { margin:0; padding:0; box-sizing:border-box; }
 html, body { width:__W__px; height:__H__px; overflow:hidden;
-  background:#020617; font-family:'Arial Black','Helvetica Neue Bold',Impact,system-ui,sans-serif; }
+  background:#020617; font-family:__FAMILY__; font-weight:700; }
 #root { position:relative; width:__W__px; height:__H__px; }
 .clip { position:absolute; inset:0; }
 .bg-base { background:linear-gradient(160deg,#0f172a 0%,#020617 70%,#000 100%); }
@@ -359,8 +604,7 @@ def compose_news(scenes: List[Scene], subject: str, width: int, height: int,
         if not scenes or total <= 0:
             return ""
         specs = build_specs(scenes, backgrounds)
-        css = (_NEWS_CSS.replace("__W__", str(width)).replace("__H__", str(height))
-               .replace("__ACCENT__", _ACCENT))
+        css = _fill_css(_NEWS_CSS, width, height)
         total_r = round(total, 3)
 
         headline = _esc((subject or "").strip().upper() or "NEWS")
@@ -408,7 +652,7 @@ def compose(scenes: List[Scene], subject: str, width: int, height: int,
         if not scenes or total <= 0:
             return ""
         specs = build_specs(scenes, backgrounds)
-        css = _CSS.replace("__W__", str(width)).replace("__H__", str(height)).replace("__ACCENT__", _ACCENT)
+        css = _fill_css(_CSS, width, height)
         total_r = round(total, 3)
 
         clips = [
@@ -430,10 +674,12 @@ def compose(scenes: List[Scene], subject: str, width: int, height: int,
             + "\n    ".join(tweens)
             + '\nwindow.__timelines["main"] = tl;\n</script>\n</body>\n</html>\n'
         )
+        mix = {}
+        for s in specs:
+            mix[s.archetype] = mix.get(s.archetype, 0) + 1
         logger.success(
             f"hyperframes studio: composed {len(specs)} scene(s) "
-            f"({sum(1 for s in specs if s.archetype == 'stat')} stat, "
-            f"{sum(1 for s in specs if s.archetype == 'statement')} statement)"
+            f"({', '.join(f'{v} {k}' for k, v in sorted(mix.items()))})"
         )
         return html
     except Exception as exc:  # noqa: BLE001 - composition must never hard-fail a run

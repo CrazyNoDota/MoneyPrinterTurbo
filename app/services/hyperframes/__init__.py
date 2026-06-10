@@ -350,26 +350,65 @@ def render_video(
         logger.warning("hyperframes: composition authoring failed; falling back to stock footage")
         return ""
 
-    # Optional fast preview pass: render a low-fps proxy and flag broken (black /
-    # empty) scenes before paying for the full-rate render. Non-blocking by design.
-    if preview.is_enabled():
-        try:
-            report = preview.preview(html, scene_list, utils.task_dir(task_id))
-            if report.issues:
-                logger.warning(
-                    f"hyperframes preview flagged {len(report.issues)} scene(s): "
-                    f"{report.issues}. Contact sheet: {report.contact_sheet}"
-                )
-            else:
-                logger.info(
-                    f"hyperframes preview clean ({len(scene_list)} scenes). "
-                    f"Contact sheet: {report.contact_sheet or 'n/a'}"
-                )
-        except Exception as exc:  # noqa: BLE001 - preview must never block the render
-            logger.warning(f"hyperframes preview pass failed (non-fatal): {exc}")
+    # Optional fast preview pass: render a low-fps proxy, flag broken (black /
+    # empty) scenes, and retry the composition once before paying for the
+    # full-rate render. Non-blocking by design.
+    html = _preview_retry(
+        task_id, html, scene_list,
+        # A dud background photo is the usual cause of a near-empty frame; the
+        # retry recomposes on the guaranteed gradient base (no photos). For the
+        # freeform engine this is also simply a fresh authoring attempt.
+        lambda: author.author_composition(scene_list, subject, width, height),
+    )
 
     out_path = os.path.join(utils.task_dir(task_id), "hyperframes.mp4")
     return render.render(html, out_path)
+
+
+def _preview_retry(task_id, html: str, scene_list, recompose) -> str:
+    """Preview ``html``; when scenes are flagged, try ``recompose()`` once.
+
+    Returns whichever variant previews cleaner (ties keep the original). Any
+    preview/recompose hiccup returns the original ``html`` -- this loop can
+    only ever improve the composition, never lose it.
+    """
+    if not preview.is_enabled():
+        return html
+    try:
+        report = preview.preview(html, scene_list, utils.task_dir(task_id))
+    except Exception as exc:  # noqa: BLE001 - preview must never block the render
+        logger.warning(f"hyperframes preview pass failed (non-fatal): {exc}")
+        return html
+    if not report.issues:
+        logger.info(
+            f"hyperframes preview clean ({len(scene_list)} scenes). "
+            f"Contact sheet: {report.contact_sheet or 'n/a'}"
+        )
+        return html
+    logger.warning(
+        f"hyperframes preview flagged {len(report.issues)} scene(s): "
+        f"{report.issues}. Contact sheet: {report.contact_sheet}. Retrying composition."
+    )
+    try:
+        retry_html = recompose() or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"hyperframes preview retry recompose failed: {exc}")
+        return html
+    if not retry_html or retry_html == html:
+        return html
+    try:
+        retry_report = preview.preview(retry_html, scene_list, utils.task_dir(task_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"hyperframes preview of retry failed: {exc}")
+        return html
+    if len(retry_report.issues) < len(report.issues):
+        logger.info(
+            f"hyperframes preview retry improved: {len(report.issues)} -> "
+            f"{len(retry_report.issues)} flagged scene(s); using the retry"
+        )
+        return retry_html
+    logger.info("hyperframes preview retry did not improve; keeping the original")
+    return html
 
 
 __all__ = [

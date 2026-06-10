@@ -725,5 +725,152 @@ class TestNewsPresenter(unittest.TestCase):
         self.assertEqual(w2l.synthesize.call_args.kwargs["script_or_audio"], audio)
 
 
+class TestStudioArchetypes(unittest.TestCase):
+    def _spec(self, text):
+        return studio.build_specs([scenes.Scene(text, 0.0, 4.0)])[0]
+
+    def test_quote_with_attribution(self):
+        spec = self._spec("«Мы изменим всю индустрию» — Илон Маск")
+        self.assertEqual(spec.archetype, "quote")
+        self.assertEqual(spec.caption, "Мы изменим всю индустрию")
+        self.assertEqual(spec.attr, "Илон Маск")
+
+    def test_quote_without_attribution(self):
+        spec = self._spec('"The best way out is always through."')
+        self.assertEqual(spec.archetype, "quote")
+        self.assertEqual(spec.attr, "")
+
+    def test_comparison_vs(self):
+        spec = self._spec("iPhone 16 vs Galaxy S25")
+        self.assertEqual(spec.archetype, "comparison")
+        self.assertEqual(spec.items, ["iPhone 16", "Galaxy S25"])
+
+    def test_comparison_russian(self):
+        spec = self._spec("Электромобили против бензиновых машин")
+        self.assertEqual(spec.archetype, "comparison")
+        self.assertEqual(spec.items[0], "Электромобили")
+
+    def test_comparison_rejects_long_halves(self):
+        long_half = "a very long meandering clause that keeps going on and on endlessly"
+        spec = self._spec(f"{long_half} vs short")
+        self.assertNotEqual(spec.archetype, "comparison")
+
+    def test_list_numbered(self):
+        spec = self._spec("Три причины: 1. Скорость 2. Цена 3. Дизайн")
+        self.assertEqual(spec.archetype, "list")
+        self.assertEqual(spec.caption, "Три причины")
+        self.assertEqual(spec.items, ["Скорость", "Цена", "Дизайн"])
+
+    def test_list_semicolons(self):
+        spec = self._spec("Speed; price; design; support")
+        self.assertEqual(spec.archetype, "list")
+        self.assertEqual(len(spec.items), 4)
+
+    def test_list_not_triggered_by_single_marker(self):
+        spec = self._spec("Step 1. Open the app and look around")
+        self.assertNotEqual(spec.archetype, "list")
+
+    def test_chart_from_two_percents(self):
+        spec = self._spec("Онлайн вырос до 78%, офлайн упал до 22%")
+        self.assertEqual(spec.archetype, "chart")
+        self.assertEqual([v for _, v in spec.bars], [78.0, 22.0])
+
+    def test_single_percent_stays_stat(self):
+        spec = self._spec("Revenue grew 25% last year")
+        self.assertEqual(spec.archetype, "stat")
+
+    def test_plain_text_stays_statement(self):
+        spec = self._spec("A calm forest at dawn over the mountains")
+        self.assertEqual(spec.archetype, "statement")
+
+    def test_compose_all_archetypes_passes_contract(self):
+        sc = [
+            scenes.Scene("«Мы изменим индустрию» — Маск", 0.0, 3.0),
+            scenes.Scene("iPhone vs Galaxy", 3.0, 3.0),
+            scenes.Scene("Итоги: 1. Рост 2. Прибыль 3. Экспансия", 6.0, 3.0),
+            scenes.Scene("Онлайн 78%, офлайн 22%", 9.0, 3.0),
+            scenes.Scene("Будущее уже здесь", 12.0, 3.0),
+        ]
+        total = max(s.end for s in sc)
+        html = studio.compose(sc, "тренды", 1080, 1920, total)
+        self.assertTrue(html)
+        ok, reason = author._validate(html, len(sc), total)
+        self.assertTrue(ok, reason)
+        for marker in ("quote-text", "vs-badge", "list-idx", "bar-fill", "headline"):
+            self.assertIn(marker, html)
+
+    def test_compose_embeds_font_family(self):
+        html = studio.compose([scenes.Scene("Просто текст", 0.0, 4.0)],
+                              "тема", 1080, 1920, 4.0)
+        self.assertIn("'Anton','Oswald'", html)
+
+
+class TestFonts(unittest.TestCase):
+    def test_stage_fonts_copies_and_returns_css(self):
+        from app.services.hyperframes import fonts
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(fonts.render, "assets_dir", return_value=d):
+            css = fonts.stage_fonts()
+            self.assertIn("font-family:'Anton'", css)
+            self.assertIn("font-family:'Oswald'", css)
+            self.assertTrue(os.path.isfile(os.path.join(d, "Anton-Regular.ttf")))
+            self.assertTrue(os.path.isfile(os.path.join(d, "Oswald-Variable.ttf")))
+
+    def test_stage_fonts_missing_bundle_is_nonfatal(self):
+        from app.services.hyperframes import fonts
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(fonts.render, "assets_dir", return_value=d), \
+             mock.patch.object(fonts, "_FONTS_DIR", os.path.join(d, "nope")):
+            self.assertEqual(fonts.stage_fonts(), "")
+
+
+class TestPreviewRetry(unittest.TestCase):
+    def _report(self, issues):
+        return preview.PreviewReport(ok=not issues, issues=issues)
+
+    def test_disabled_returns_original(self):
+        with mock.patch.object(hf.preview, "is_enabled", return_value=False), \
+             mock.patch.object(hf.preview, "preview") as pv:
+            out = hf._preview_retry("t", "<html>", [], lambda: "<other>")
+        self.assertEqual(out, "<html>")
+        pv.assert_not_called()
+
+    def test_clean_preview_keeps_original(self):
+        with mock.patch.object(hf.preview, "is_enabled", return_value=True), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(hf.preview, "preview", return_value=self._report([])):
+            out = hf._preview_retry("t", "<html>", [], lambda: "<other>")
+        self.assertEqual(out, "<html>")
+
+    def test_retry_used_when_it_previews_cleaner(self):
+        reports = [self._report([(1, "near-empty/black frame")]), self._report([])]
+        with mock.patch.object(hf.preview, "is_enabled", return_value=True), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(hf.preview, "preview", side_effect=reports):
+            out = hf._preview_retry("t", "<html>", [], lambda: "<better>")
+        self.assertEqual(out, "<better>")
+
+    def test_retry_discarded_when_not_better(self):
+        issue = [(1, "near-empty/black frame")]
+        reports = [self._report(issue), self._report(issue)]
+        with mock.patch.object(hf.preview, "is_enabled", return_value=True), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(hf.preview, "preview", side_effect=reports):
+            out = hf._preview_retry("t", "<html>", [], lambda: "<retry>")
+        self.assertEqual(out, "<html>")
+
+    def test_recompose_failure_keeps_original(self):
+        def boom():
+            raise RuntimeError("llm down")
+
+        with mock.patch.object(hf.preview, "is_enabled", return_value=True), \
+             mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
+             mock.patch.object(
+                 hf.preview, "preview",
+                 return_value=self._report([(0, "near-empty/black frame")])):
+            out = hf._preview_retry("t", "<html>", [], boom)
+        self.assertEqual(out, "<html>")
+
+
 if __name__ == "__main__":
     unittest.main()
