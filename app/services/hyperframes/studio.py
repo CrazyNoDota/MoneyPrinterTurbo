@@ -397,15 +397,20 @@ def _scene_body(spec: SceneSpec, idx: int) -> str:
         )
     if spec.archetype == "chart":
         rows = []
+        # Bars are normalized to the largest value (infographic convention):
+        # comparing 9% vs 15% should read as a 60/100 contrast, not two slivers
+        # on an absolute 0-100 track.
+        peak = max((value for _, value in spec.bars), default=0) or 1
         for n, (label, value) in enumerate(spec.bars):
             pct = round(value, 1)
             pct_str = f"{pct:g}%"
+            width = round(value / peak * 100, 1)
             rows.append(
                 f'<div class="line chart-row">'
                 f'<div class="bar-head"><span>{_esc(label) or "&nbsp;"}</span>'
                 f'<span class="bar-pct">{pct_str}</span></div>'
                 f'<div class="bar-track"><div class="bar-fill" '
-                f'style="width:{pct:g}%"></div></div></div>'
+                f'style="width:{width:g}%"></div></div></div>'
             )
         return (
             f'<div class="line chart-caption">{_esc(spec.caption)}</div>'

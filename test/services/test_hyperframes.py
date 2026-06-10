@@ -782,6 +782,17 @@ class TestStudioArchetypes(unittest.TestCase):
         self.assertEqual(spec.archetype, "chart")
         self.assertEqual([v for _, v in spec.bars], [78.0, 22.0])
 
+    def test_chart_bars_normalized_to_peak(self):
+        # 9% vs 15% must render as a 60/100 width contrast, with the real
+        # percent kept in the label.
+        spec = self._spec("Депозит приносит 9% — инфляция забирает 15%")
+        self.assertEqual(spec.archetype, "chart")
+        html = studio._scene_body(spec, 0)
+        self.assertIn("width:100%", html)
+        self.assertIn("width:60%", html)
+        self.assertIn(">9%<", html)
+        self.assertIn(">15%<", html)
+
     def test_single_percent_stays_stat(self):
         spec = self._spec("Revenue grew 25% last year")
         self.assertEqual(spec.archetype, "stat")
