@@ -30,6 +30,7 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
+from app.config import config
 from app.services.utils import video_effects
 from app.utils import file_security, utils
 
@@ -470,6 +471,63 @@ def combine_videos(
     return combined_video_path
 
 
+_KARAOKE_PUNCTUATION = ".!?,;:。！？，；：…"
+
+
+def group_words_into_chunks(
+    words,
+    max_words: int = 4,
+    pause_threshold: float = 0.5,
+):
+    """Group per-word timings into short karaoke caption chunks.
+
+    ``words`` is a list of ``{"text", "start", "end"}`` dicts (seconds). Chunks
+    break on (a) reaching ``max_words``, (b) a gap > ``pause_threshold`` seconds
+    between consecutive words, or (c) sentence-ending punctuation on a word.
+    Returns a list of chunks, each ``{"start", "end", "words": [...]}`` where the
+    inner words preserve their individual ``{text, start, end}``.
+    """
+    chunks = []
+    current = []
+
+    def flush():
+        if not current:
+            return
+        chunks.append(
+            {
+                "start": current[0]["start"],
+                "end": current[-1]["end"],
+                "words": list(current),
+            }
+        )
+        current.clear()
+
+    prev_end = None
+    for w in words:
+        text = (w.get("text") or "").strip()
+        if not text:
+            continue
+        start = float(w.get("start", 0.0))
+        end = float(w.get("end", start))
+        if end < start:
+            end = start
+
+        if current:
+            gap = start - prev_end if prev_end is not None else 0.0
+            if len(current) >= max_words or gap > pause_threshold:
+                flush()
+
+        current.append({"text": text, "start": start, "end": end})
+        prev_end = end
+
+        # Break after sentence-ending punctuation so chunks read naturally.
+        if text[-1] in _KARAOKE_PUNCTUATION:
+            flush()
+
+    flush()
+    return chunks
+
+
 def wrap_text(text, max_width, font="Arial", fontsize=60):
     # Create ImageFont
     font = ImageFont.truetype(font, fontsize)
@@ -524,6 +582,230 @@ def wrap_text(text, max_width, font="Arial", fontsize=60):
     return result, height
 
 
+# ---------------------------------------------------------------------------
+# WP4: BGM ducking + transition SFX (config-gated, non-fatal)
+# ---------------------------------------------------------------------------
+
+# Gap (seconds) below which two adjacent word/phrase intervals are treated as a
+# single continuous speech span (avoids the BGM swelling for tiny inter-word
+# silences). Ramp length is the linear fade applied at each speech edge.
+_SPEECH_MERGE_GAP = 0.7
+_DUCK_RAMP = 0.2  # ~200 ms linear ramp
+
+
+def _srt_timestamp_to_seconds(ts: str) -> float:
+    """Parse an SRT ``HH:MM:SS,mmm`` timestamp into float seconds."""
+    ts = ts.strip().replace(".", ",")
+    hms, _, ms = ts.partition(",")
+    parts = hms.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"bad srt timestamp: {ts!r}")
+    h, m, s = (int(p) for p in parts)
+    millis = int(ms) if ms else 0
+    return h * 3600 + m * 60 + s + millis / 1000.0
+
+
+def _intervals_from_words(words: list) -> list:
+    """Return raw ``(start, end)`` tuples from a word-timing sidecar list."""
+    out = []
+    for w in words or []:
+        try:
+            start = float(w["start"])
+            end = float(w["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end > start:
+            out.append((start, end))
+    return out
+
+
+def _intervals_from_srt(subtitle_path: str) -> list:
+    """Return raw ``(start, end)`` phrase tuples parsed from an SRT file."""
+    out = []
+    try:
+        from app.services import subtitle as subtitle_service
+
+        for _idx, times, _text in subtitle_service.file_to_subtitles(subtitle_path):
+            # ``times`` looks like "00:00:01,000 --> 00:00:03,500"
+            if "-->" not in times:
+                continue
+            lo_s, _, hi_s = times.partition("-->")
+            start = _srt_timestamp_to_seconds(lo_s)
+            end = _srt_timestamp_to_seconds(hi_s)
+            if end > start:
+                out.append((start, end))
+    except Exception as e:
+        logger.warning(f"failed to parse srt for ducking envelope: {str(e)}")
+        return []
+    return out
+
+
+def merge_speech_spans(intervals: list, gap: float = _SPEECH_MERGE_GAP) -> list:
+    """Merge ``(start, end)`` intervals into speech spans.
+
+    Intervals are sorted; any two whose gap is < ``gap`` seconds are merged
+    into one continuous span. Returns a sorted list of non-overlapping
+    ``(start, end)`` tuples.
+    """
+    cleaned = [(float(a), float(b)) for a, b in intervals if b > a]
+    if not cleaned:
+        return []
+    cleaned.sort(key=lambda iv: iv[0])
+    spans = [list(cleaned[0])]
+    for start, end in cleaned[1:]:
+        last = spans[-1]
+        if start - last[1] < gap:
+            if end > last[1]:
+                last[1] = end
+        else:
+            spans.append([start, end])
+    return [(s, e) for s, e in spans]
+
+
+def build_speech_spans(subtitle_path: str, karaoke_words: list = None) -> list:
+    """Build the voice-activity speech spans for BGM ducking.
+
+    Prefers the word-timing sidecar (passed in or loaded next to the SRT);
+    falls back to SRT phrase ranges. Returns ``[]`` when no timing data is
+    available so callers can keep today's flat-mix behaviour.
+    """
+    intervals = []
+    words = karaoke_words
+    if not words and subtitle_path:
+        try:
+            from app.services import subtitle as subtitle_service
+
+            words = subtitle_service.load_words_sidecar(subtitle_path)
+        except Exception as e:
+            logger.warning(f"failed to load words sidecar for ducking: {str(e)}")
+            words = []
+    if words:
+        intervals = _intervals_from_words(words)
+    if not intervals and subtitle_path and os.path.exists(subtitle_path):
+        intervals = _intervals_from_srt(subtitle_path)
+    return merge_speech_spans(intervals)
+
+
+def make_duck_gain_fn(spans: list, base_volume: float, duck_volume: float,
+                      ramp: float = _DUCK_RAMP):
+    """Return ``g(t)`` mapping time → BGM gain, with linear ramps at span edges.
+
+    ``t`` may be a scalar or a numpy array. Gain is ``duck_volume`` while
+    speech is active, ``base_volume`` in gaps/before/after, with a linear
+    ramp of length ``ramp`` seconds on each side of every speech edge
+    (ramp centred on the edge: half before, half after).
+    """
+    import numpy as np
+
+    starts = np.array([s for s, _ in spans], dtype=float)
+    ends = np.array([e for _, e in spans], dtype=float)
+    half = max(ramp, 1e-6) / 2.0
+
+    def g(t):
+        t_arr = np.asarray(t, dtype=float)
+        # speech_level(t): 1.0 fully inside a speech span, 0.0 fully outside,
+        # linearly ramping across the +/- half window at each edge.
+        level = np.zeros(t_arr.shape, dtype=float)
+        for s, e in zip(starts, ends):
+            # rising edge centred at s, falling edge centred at e
+            rise = np.clip((t_arr - (s - half)) / (2 * half), 0.0, 1.0)
+            fall = np.clip(((e + half) - t_arr) / (2 * half), 0.0, 1.0)
+            contrib = np.minimum(rise, fall)
+            level = np.maximum(level, contrib)
+        gain = base_volume + (duck_volume - base_volume) * level
+        if np.isscalar(t) or np.ndim(t) == 0:
+            return float(gain)
+        return gain
+
+    return g
+
+
+def apply_bgm_ducking(bgm_clip, spans: list, base_volume: float,
+                      duck_volume: float):
+    """Apply a time-varying ducking gain to ``bgm_clip``.
+
+    Returns a new clip whose per-sample amplitude is scaled by the gain
+    function. Falls back (returns the input unchanged) on any error.
+    """
+    import numpy as np
+
+    if not spans:
+        return bgm_clip
+    g = make_duck_gain_fn(spans, base_volume, duck_volume)
+
+    def _apply(get_frame, t):
+        frame = get_frame(t)
+        gain = g(t)
+        gain_arr = np.asarray(gain, dtype=float)
+        if frame.ndim == 2:
+            gain_arr = gain_arr.reshape(-1, 1)
+        return frame * gain_arr
+
+    return bgm_clip.transform(_apply, keep_duration=True)
+
+
+def compute_sfx_cut_times(spans: list, total_duration: float = None,
+                          min_gap: float = 0.8) -> list:
+    """Derive transition-SFX cut points from speech spans.
+
+    A cut is placed at the start of each speech span (a new narration
+    beat / scene). ``t=0`` is skipped, cuts within ``min_gap`` seconds of
+    each other are de-duplicated, and anything past ``total_duration`` is
+    dropped. Returns a sorted list of cut times in seconds.
+    """
+    cuts = []
+    for s, _e in spans:
+        if s <= 0.05:
+            continue
+        if total_duration is not None and s >= total_duration:
+            continue
+        if cuts and s - cuts[-1] < min_gap:
+            continue
+        cuts.append(s)
+    return cuts
+
+
+def _overlay_transition_sfx(audio_clip, spans: list, total_duration: float):
+    """Overlay a whoosh SFX at each scene-cut point (config-gated, non-fatal).
+
+    Returns a new composite audio clip with the SFX mixed in, or the
+    original ``audio_clip`` unchanged when disabled, when no cut points
+    exist, or when the SFX asset is missing.
+    """
+    if not bool(config.app.get("sfx_enabled", True)):
+        return audio_clip
+    cuts = compute_sfx_cut_times(spans, total_duration=total_duration)
+    if not cuts:
+        logger.debug("transition sfx: no cut points; skipping")
+        return audio_clip
+
+    from app.services.sfx import get_sfx_file
+
+    whoosh_path = get_sfx_file("whoosh")
+    if not whoosh_path:
+        logger.debug("transition sfx: whoosh asset missing; skipping")
+        return audio_clip
+
+    sfx_volume = float(config.app.get("sfx_volume", 0.6))
+    layers = [audio_clip]
+    placed = 0
+    for t in cuts:
+        try:
+            clip = (
+                AudioFileClip(whoosh_path)
+                .with_effects([afx.MultiplyVolume(sfx_volume)])
+                .with_start(t)
+            )
+            layers.append(clip)
+            placed += 1
+        except Exception as e:
+            logger.debug(f"transition sfx: failed at t={t:.2f}s: {str(e)}")
+    if placed == 0:
+        return audio_clip
+    logger.info(f"overlaid {placed} transition sfx cut(s)")
+    return CompositeAudioClip(layers)
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -572,11 +854,16 @@ def generate_video(
         return params.text_background_color
 
     # Subtitle look:
-    #   tiktok  -> ALL-CAPS, heavy outline + drop shadow (loud viral "shorts" look; default)
+    #   karaoke -> CapCut/TikTok word-by-word highlight (default)
+    #   tiktok  -> ALL-CAPS, heavy outline + drop shadow (loud viral "shorts" look)
     #   outline -> no box, thick outline (clean modern caption)
     #   shadow  -> outline + a soft drop shadow for extra pop
     #   box     -> the legacy solid background box (uses text_background_color)
     subtitle_style = (getattr(params, "subtitle_style", "") or "tiktok").strip().lower()
+    # Karaoke loads a word-timing sidecar; if it is missing/malformed we degrade
+    # to the "tiktok" phrase captions. ``render_style`` is what the per-line
+    # renderer below actually draws (karaoke uses its own dedicated renderer).
+    render_style = "tiktok" if subtitle_style == "karaoke" else subtitle_style
 
     def split_long_subtitle(subtitle_item):
         """Split a long subtitle range into sequential readable caption chunks."""
@@ -627,7 +914,7 @@ def generate_video(
         phrase = subtitle_item[1]
         # The punchy "tiktok" look is all-caps. Uppercase before wrapping so the
         # line-width math uses the (wider) capital glyphs and nothing overflows.
-        if subtitle_style == "tiktok":
+        if render_style == "tiktok":
             phrase = phrase.upper()
         max_width = video_width * 0.9
         max_caption_height = video_height * 0.28
@@ -658,10 +945,10 @@ def generate_video(
         # the text needs a strong outline to stay legible over any footage, so we
         # honor a larger user-set stroke but enforce a sensible minimum.
         provided_stroke = int(params.stroke_width)
-        if subtitle_style == "box":
+        if render_style == "box":
             bg_color = resolve_subtitle_background_color()
             stroke_width = provided_stroke
-        elif subtitle_style == "tiktok":
+        elif render_style == "tiktok":
             # Loud captions need a heavy outline so the words punch off any footage.
             bg_color = None
             stroke_width = max(provided_stroke, max(4, round(font_size * 0.09)))
@@ -713,7 +1000,7 @@ def generate_video(
             )
 
         clips = []
-        if subtitle_style in ("shadow", "tiktok"):
+        if render_style in ("shadow", "tiktok"):
             offset = max(2, round(font_size * 0.06))
             shadow_clip = TextClip(
                 color="#000000",
@@ -725,6 +1012,128 @@ def generate_video(
             clips.append(_timed(shadow_clip, (x + offset, y + offset)))
         clips.append(_timed(main_clip, (x, y)))
         return clips
+
+    highlight_color = (
+        getattr(params, "subtitle_highlight_color", "") or "#FFE600"
+    ).strip()
+
+    def create_karaoke_clips(chunk):
+        """Render one karaoke caption chunk as word-by-word highlighted clips.
+
+        Each word is rendered twice (base color + highlight color); the base
+        glyphs are laid out as a centered single row, then for every word
+        interval the active word is swapped for its slightly-scaled highlight
+        copy. Heavy outline + drop shadow are kept so text stays legible. Reuses
+        already-rendered TextClips via lightweight ``.with_*`` views, so the cost
+        is ~2 renders per word, not per (word x interval).
+        """
+        words = chunk.get("words") or []
+        if not words:
+            return []
+
+        chunk_start = chunk["start"]
+        chunk_end = chunk["end"]
+
+        # Shrink the font until the row fits the safe width.
+        max_width = video_width * 0.92
+        font_size = int(params.font_size)
+        min_font_size = max(28, int(params.font_size * 0.55))
+        gap = 0
+        base_clips = []
+        highlight_clips = []
+        widths = []
+
+        provided_stroke = int(params.stroke_width)
+
+        def _build(size_px):
+            stroke_width = max(provided_stroke, max(4, round(size_px * 0.09)))
+            bases, highs, ws = [], [], []
+            for w in words:
+                token = w["text"].upper()
+                common = dict(
+                    text=token,
+                    font=font_path,
+                    font_size=size_px,
+                    stroke_width=stroke_width,
+                )
+                base = TextClip(
+                    color=params.text_fore_color,
+                    stroke_color=params.stroke_color,
+                    **common,
+                )
+                high = TextClip(
+                    color=highlight_color,
+                    stroke_color=params.stroke_color,
+                    **common,
+                )
+                bases.append(base)
+                highs.append(high)
+                ws.append(base.w)
+            return bases, highs, ws, stroke_width
+
+        while True:
+            base_clips, highlight_clips, widths, stroke_width = _build(font_size)
+            gap = max(6, int(font_size * 0.18))
+            total_width = sum(widths) + gap * (len(words) - 1)
+            if total_width <= max_width or font_size <= min_font_size:
+                break
+            # Dispose of the oversized renders before retrying smaller.
+            for c in base_clips + highlight_clips:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            font_size = max(min_font_size, font_size - 4)
+
+        row_height = max((c.h for c in base_clips), default=font_size)
+        total_width = sum(widths) + gap * (len(words) - 1)
+
+        # Vertical placement mirrors the phrase-caption logic.
+        if params.subtitle_position == "bottom":
+            y = video_height * 0.95 - row_height
+        elif params.subtitle_position == "top":
+            y = video_height * 0.05
+        elif params.subtitle_position == "custom":
+            margin = 10
+            max_y = video_height - row_height - margin
+            y = (video_height - row_height) * (params.custom_position / 100)
+            y = max(margin, min(y, max_y))
+        else:  # center
+            y = (video_height - row_height) / 2
+
+        x0 = (video_width - total_width) / 2
+        # Pre-compute each word's left edge in the centered row.
+        x_positions = []
+        cursor = x0
+        for w in widths:
+            x_positions.append(cursor)
+            cursor += w + gap
+
+        out = []
+        for i, w in enumerate(words):
+            w_start = max(w["start"], chunk_start)
+            w_end = w["end"]
+            if i == len(words) - 1:
+                w_end = max(w_end, chunk_end)
+            if w_end <= w_start:
+                w_end = w_start + 0.05
+
+            # Render the whole row for this word interval; only word ``i`` is
+            # highlighted (and slightly enlarged). The heavy per-glyph stroke
+            # keeps the text legible over any footage.
+            for j in range(len(words)):
+                active = j == i
+                src = highlight_clips[j] if active else base_clips[j]
+                wy = y
+                px = x_positions[j]
+                if active:
+                    src = src.resized(1.15)
+                    wy = y - (src.h - row_height) / 2
+                    px = x_positions[j] - (src.w - widths[j]) / 2
+                out.append(
+                    src.with_position((px, wy)).with_start(w_start).with_end(w_end)
+                )
+        return out
 
     video_clip = _open_video_clip_quietly(video_path)
     audio_clip = AudioFileClip(audio_path).with_effects(
@@ -747,7 +1156,40 @@ def generate_video(
         mid = (start + end) / 2
         return any(lo <= mid <= hi for lo, hi in subtitle_ranges)
 
-    if subtitle_path and os.path.exists(subtitle_path):
+    def _chunk_in_subtitle_ranges(chunk) -> bool:
+        if subtitle_ranges is None:
+            return True
+        mid = (chunk["start"] + chunk["end"]) / 2
+        return any(lo <= mid <= hi for lo, hi in subtitle_ranges)
+
+    karaoke_words = []
+    if subtitle_style == "karaoke" and subtitle_path:
+        try:
+            from app.services import subtitle as subtitle_service
+
+            karaoke_words = subtitle_service.load_words_sidecar(subtitle_path)
+        except Exception as e:
+            logger.warning(f"failed to load karaoke word timings: {str(e)}")
+            karaoke_words = []
+        if not karaoke_words:
+            logger.warning(
+                "karaoke style requested but no usable word-timing sidecar; "
+                "falling back to phrase captions"
+            )
+
+    if subtitle_style == "karaoke" and karaoke_words:
+        text_clips = []
+        chunks = group_words_into_chunks(karaoke_words)
+        for chunk in chunks:
+            if not _chunk_in_subtitle_ranges(chunk):
+                continue
+            try:
+                text_clips.extend(create_karaoke_clips(chunk))
+            except Exception as e:
+                logger.warning(f"failed to render karaoke chunk: {str(e)}")
+        if text_clips:
+            video_clip = CompositeVideoClip([video_clip, *text_clips])
+    elif subtitle_path and os.path.exists(subtitle_path):
         sub = SubtitlesClip(
             subtitles=subtitle_path, encoding="utf-8", make_textclip=make_textclip
         )
@@ -760,19 +1202,54 @@ def generate_video(
         if text_clips:
             video_clip = CompositeVideoClip([video_clip, *text_clips])
 
+    # WP4: voice-activity speech spans drive both BGM ducking and the
+    # transition-SFX cut points. Built once; empty list => no timing data
+    # available, so we keep today's flat-mix behaviour.
+    speech_spans = []
+    try:
+        speech_spans = build_speech_spans(subtitle_path, karaoke_words)
+    except Exception as e:
+        logger.warning(f"failed to build speech spans (ducking disabled): {str(e)}")
+        speech_spans = []
+
+    bgm_ducking_enabled = bool(config.app.get("bgm_ducking_enabled", True))
+    bgm_duck_volume = float(config.app.get("bgm_duck_volume", 0.15))
+
     bgm_file = get_bgm_file(bgm_type=params.bgm_type, bgm_file=params.bgm_file)
     if bgm_file:
         try:
             bgm_clip = AudioFileClip(bgm_file).with_effects(
                 [
-                    afx.MultiplyVolume(params.bgm_volume),
                     afx.AudioFadeOut(3),
                     afx.AudioLoop(duration=video_clip.duration),
                 ]
             )
+            if bgm_ducking_enabled and speech_spans:
+                # Time-varying ducking gain (params.bgm_volume in gaps,
+                # bgm_duck_volume under speech, ~200 ms ramps).
+                bgm_clip = apply_bgm_ducking(
+                    bgm_clip, speech_spans, params.bgm_volume, bgm_duck_volume
+                )
+                logger.info(
+                    f"bgm ducking active over {len(speech_spans)} speech span(s)"
+                )
+            else:
+                # Flat fallback: no timing data or ducking disabled.
+                bgm_clip = bgm_clip.with_effects(
+                    [afx.MultiplyVolume(params.bgm_volume)]
+                )
             audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
         except Exception as e:
             logger.error(f"failed to add bgm: {str(e)}")
+
+    # WP4: overlay transition SFX (whoosh) at scene-cut points derived from
+    # the speech spans. Config-gated and fully non-fatal.
+    try:
+        audio_clip = _overlay_transition_sfx(
+            audio_clip, speech_spans, video_clip.duration
+        )
+    except Exception as e:
+        logger.warning(f"failed to overlay transition sfx: {str(e)}")
 
     video_clip = video_clip.with_audio(audio_clip)
     # 显式沿用输入音频的采样率；如果取不到，再回退到 MoviePy 默认的 44100Hz。

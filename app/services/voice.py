@@ -2447,6 +2447,60 @@ def _build_subtitle_items_from_legacy_submaker(
     return sub_items
 
 
+def _extract_word_timings_from_submaker(sub_maker: SubMaker) -> list:
+    """Pull per-word ``{text, start, end}`` (seconds) out of a SubMaker.
+
+    edge_tts 7.x exposes fine-grained ``cues`` (one per word/phrase boundary);
+    the project's other TTS paths fall back to the legacy ``subs``/``offset``
+    structure (100-ns units). Returns ``[]`` when neither carries usable timing.
+    """
+    words = []
+    try:
+        if hasattr(sub_maker, "cues") and sub_maker.cues:
+            for cue in sub_maker.cues:
+                text = unescape(cue.content or "").strip()
+                if not text:
+                    continue
+                words.append(
+                    {
+                        "text": text,
+                        "start": float(cue.start.total_seconds()),
+                        "end": float(cue.end.total_seconds()),
+                    }
+                )
+            return words
+
+        legacy_offsets = getattr(sub_maker, "offset", [])
+        legacy_subs = getattr(sub_maker, "subs", [])
+        for offset, sub in zip(legacy_offsets, legacy_subs):
+            text = unescape(sub or "").strip()
+            if not text:
+                continue
+            start, end = offset
+            words.append(
+                {
+                    "text": text,
+                    "start": float(start) / 10000000,
+                    "end": float(end) / 10000000,
+                }
+            )
+    except Exception as e:
+        logger.warning(f"failed to extract word timings from sub_maker: {str(e)}")
+        return []
+    return words
+
+
+def _write_words_sidecar(sub_maker: SubMaker, subtitle_file: str) -> None:
+    """Write the karaoke word-timing sidecar next to ``subtitle_file`` (non-fatal)."""
+    try:
+        from app.services import subtitle as subtitle_service
+
+        words = _extract_word_timings_from_submaker(sub_maker)
+        subtitle_service.write_words_sidecar(subtitle_file, words)
+    except Exception as e:
+        logger.warning(f"failed to write word-timing sidecar: {str(e)}")
+
+
 def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
     """
     优化字幕文件
@@ -2470,7 +2524,9 @@ def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
             )
             return
 
-        _write_subtitle_items(sub_items, subtitle_file)
+        if _write_subtitle_items(sub_items, subtitle_file):
+            # Emit the karaoke word-timing sidecar from the same SubMaker.
+            _write_words_sidecar(sub_maker, subtitle_file)
     except Exception as e:
         logger.error(f"failed, error: {str(e)}")
 

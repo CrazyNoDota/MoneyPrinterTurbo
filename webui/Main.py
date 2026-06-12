@@ -1092,12 +1092,13 @@ with right_panel:
         config.ui["subtitle_position"] = params.subtitle_position
 
         subtitle_styles = [
+            (tr("Karaoke (word-by-word highlight)"), "karaoke"),
             (tr("TikTok (punchy, all-caps)"), "tiktok"),
             (tr("Outline (clean)"), "outline"),
             (tr("Drop Shadow"), "shadow"),
             (tr("Background Box"), "box"),
         ]
-        saved_subtitle_style = config.ui.get("subtitle_style", "tiktok")
+        saved_subtitle_style = config.ui.get("subtitle_style", "karaoke")
         saved_style_index = 0
         for i, (_, style_value) in enumerate(subtitle_styles):
             if style_value == saved_subtitle_style:
@@ -1111,6 +1112,15 @@ with right_panel:
         )
         params.subtitle_style = subtitle_styles[selected_style_index][1]
         config.ui["subtitle_style"] = params.subtitle_style
+
+        if params.subtitle_style == "karaoke":
+            saved_highlight_color = config.ui.get(
+                "subtitle_highlight_color", "#FFE600"
+            )
+            params.subtitle_highlight_color = st.color_picker(
+                tr("Highlight Color"), saved_highlight_color
+            )
+            config.ui["subtitle_highlight_color"] = params.subtitle_highlight_color
 
         if params.subtitle_position == "custom":
             saved_custom_position = config.ui.get("custom_position", 70.0)
