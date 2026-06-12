@@ -35,7 +35,22 @@ from . import assemble, assets, author, plan, preview, render, scenes
 
 ClipScene = scenes.Scene
 
-_VALID_MODES = ("footage", "hyperframes", "mixed", "news")
+_VALID_MODES = ("footage", "hyperframes", "mixed", "news", "quiz", "ranking", "chat")
+
+# The spoken countdown cue inserted between a quiz question and its answer. The
+# TTS reads it (so the audio has a real ~2-3s beat), and scenes.from_script /
+# the proportional timeline give it its own scene that the studio renders as the
+# animated 3-2-1 visual. Kept short and digit-only so it reads as a countdown.
+QUIZ_COUNTDOWN_CUE = "Three... two... one..."
+
+# Minimum on-screen seconds for the animated countdown beat (the one hard-coded
+# duration WP2 is allowed -- everything else is timed from real narration).
+_COUNTDOWN_MIN_SECONDS = 2.4
+
+# Invisible separator (U+2063) used to mark answer / rank narration so the studio
+# composer can classify scenes without re-parsing the LLM JSON. It survives TTS
+# (silent) and the SRT/scene round-trip (not whitespace, so not collapsed).
+_MARK = "⁣"
 
 
 def is_enabled(params=None) -> bool:
@@ -299,6 +314,267 @@ def render_news_video(
     return base, [(0.0, end)]
 
 
+def quiz_narration(quiz: dict) -> str:
+    """Build the continuous narration script for a quiz.
+
+    Per question: the question, the spoken 3-2-1 countdown cue, then the answer
+    (and fun fact). The answer is prefixed with the invisible marker so the
+    studio can tell answer scenes from question scenes after the SRT round-trip.
+    """
+    parts = []
+    for item in (quiz or {}).get("questions", []):
+        q = (item.get("q") or "").strip()
+        a = (item.get("a") or "").strip()
+        if not q or not a:
+            continue
+        fact = (item.get("fun_fact") or "").strip()
+        answer = f"{_MARK}{a}"
+        if fact:
+            answer = f"{answer} — {fact}"
+        parts.extend([q, QUIZ_COUNTDOWN_CUE, answer])
+    return "\n".join(parts)
+
+
+def ranking_narration(ranking: dict) -> str:
+    """Build the continuous narration for a Top-N ranking (title, then #N..#1).
+
+    Each ranked line is marked with ``<MARK><rank><MARK>`` so the studio renders
+    the rank badge; the title line carries no marker.
+    """
+    title = (ranking or {}).get("title", "").strip()
+    parts = [title] if title else []
+    for item in (ranking or {}).get("items", []):
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        rank = item.get("rank")
+        reason = (item.get("reason") or "").strip()
+        body = f"{name} — {reason}" if reason else name
+        parts.append(f"{_MARK}{rank}{_MARK}{body}")
+    return "\n".join(parts)
+
+
+def _quiz_scene_list(quiz: dict, total: float) -> List[scenes.Scene]:
+    """Time a quiz's question/countdown/answer scenes across ``total`` seconds.
+
+    The countdown beats are given a fixed minimum window; the rest of the audio
+    is split between question and answer scenes proportionally to their text
+    length (a robust stand-in for SRT cue boundaries that always aligns scene
+    text with what is being narrated).
+    """
+    rows = []  # (text, weight, fixed_seconds_or_None)
+    for item in (quiz or {}).get("questions", []):
+        q = (item.get("q") or "").strip()
+        a = (item.get("a") or "").strip()
+        if not q or not a:
+            continue
+        fact = (item.get("fun_fact") or "").strip()
+        answer = f"{_MARK}{a}" + (f" — {fact}" if fact else "")
+        rows.append((q, max(len(q), 1), None))
+        rows.append((QUIZ_COUNTDOWN_CUE, 0, _COUNTDOWN_MIN_SECONDS))
+        rows.append((answer, max(len(answer), 1), None))
+    return _distribute(rows, total)
+
+
+def _ranking_scene_list(ranking: dict, total: float) -> List[scenes.Scene]:
+    """Time a ranking's title + ranked-item scenes across ``total`` seconds."""
+    rows = []
+    title = (ranking or {}).get("title", "").strip()
+    if title:
+        rows.append((title, max(len(title), 1), None))
+    for item in (ranking or {}).get("items", []):
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        reason = (item.get("reason") or "").strip()
+        body = f"{name} — {reason}" if reason else name
+        text = f"{_MARK}{item.get('rank')}{_MARK}{body}"
+        rows.append((text, max(len(text), 1), None))
+    return _distribute(rows, total)
+
+
+def chat_narration(story: dict) -> str:
+    """Build the single continuous narration for a messenger chat story.
+
+    One TTS voice reads the whole exchange as "Name: text" lines, so the listener
+    can follow who is speaking (a single-track read is what the WP2 proportional
+    timing model supports). Each line is prefixed with the invisible
+    ``<MARK><side><MARK>`` marker so the studio can recover each message's side
+    (left/right bubble) after the TTS/SRT round-trip without re-parsing the JSON.
+
+    NOTE (future enhancement): a true two-voice read (alternating TTS voices per
+    speaker, durations measured per message and concatenated) would feel less
+    robotic. It needs per-segment audio assembly the current timing model does
+    not yet do; tracked in docs/VIRAL_UPGRADE_PLAN.md (WP5).
+    """
+    persons = (story or {}).get("persons") or ["A", "B"]
+    parts = []
+    for msg in (story or {}).get("messages", []):
+        text = (msg.get("text") or "").strip()
+        if not text:
+            continue
+        side = 1 if msg.get("from") else 0
+        name = (persons[side] if side < len(persons) else "") or ""
+        spoken = f"{name}: {text}" if name else text
+        parts.append(f"{_MARK}{side}{_MARK}{spoken}")
+    return "\n".join(parts)
+
+
+def _chat_scene_list(story: dict, total: float) -> List[scenes.Scene]:
+    """Time a chat story's per-message scenes across ``total`` seconds.
+
+    One scene per message, weighted by the spoken text length (the same
+    proportional model the quiz/ranking lists use). Each scene's text carries the
+    ``<MARK><side><MARK>`` prefix so the composer renders the correct bubble side.
+    """
+    persons = (story or {}).get("persons") or ["A", "B"]
+    rows = []
+    for msg in (story or {}).get("messages", []):
+        text = (msg.get("text") or "").strip()
+        if not text:
+            continue
+        side = 1 if msg.get("from") else 0
+        name = (persons[side] if side < len(persons) else "") or ""
+        spoken = f"{name}: {text}" if name else text
+        marked = f"{_MARK}{side}{_MARK}{text}"
+        rows.append((marked, max(len(spoken), 1), None))
+    return _distribute(rows, total)
+
+
+def _distribute(rows, total: float) -> List[scenes.Scene]:
+    """Lay ``rows`` (text, weight, fixed_seconds) on a contiguous timeline.
+
+    Fixed-duration rows (the countdown beats) take their seconds off the top;
+    the remainder is split among the weighted rows proportionally to their text.
+    """
+    if not rows or total <= 0:
+        return []
+    fixed_total = sum(f for _, _, f in rows if f)
+    flexible = max(total - fixed_total, 0.01)
+    weight_total = sum(w for _, w, f in rows if not f) or 1
+    out: List[scenes.Scene] = []
+    cursor = 0.0
+    flexible_seen = 0.0
+    flex_rows = [r for r in rows if not r[2]]
+    for text, weight, fixed in rows:
+        if fixed:
+            dur = fixed
+        else:
+            flexible_seen += 1
+            if flexible_seen == len(flex_rows):
+                # absorb rounding drift into the last flexible scene
+                dur = max(total - cursor, 0.01)
+            else:
+                dur = max(flexible * (weight / weight_total), 0.01)
+        out.append(scenes.Scene(text=text, start=round(cursor, 3), duration=round(dur, 3)))
+        cursor += dur
+    return out
+
+
+def render_quiz_video(
+    task_id, params, quiz, audio_file, subtitle_path, audio_duration,
+    video_terms=None,
+):
+    """Quiz mode: question -> 3-2-1 countdown -> answer reveal, per question.
+
+    Returns ``(video_path, caption_ranges)``; ``caption_ranges`` is ``[]`` (the
+    cards carry all the text, so no burned captions). ``("", [])`` on any
+    problem -> stock-footage fallback. ``quiz`` is the structured dict from
+    ``llm.generate_quiz``.
+    """
+    if not is_available():
+        logger.warning("hyperframes quiz enabled but toolchain not installed; run setup-hyperframes.bat")
+        return "", []
+    total = float(audio_duration or 0)
+    scene_list = _quiz_scene_list(quiz, total)
+    if not scene_list:
+        logger.warning("hyperframes quiz: no scenes; falling back to stock footage")
+        return "", []
+    width, height = _resolution(params)
+    subject = (getattr(params, "video_subject", "") or "").strip()
+    assets.reset()
+    backgrounds = _solely_backgrounds(params, video_terms, _image_source(params))
+    from . import studio
+
+    html = studio.compose_quiz(scene_list, subject, width, height, total, backgrounds=backgrounds)
+    if not html:
+        logger.warning("hyperframes quiz: composition failed; falling back to stock footage")
+        return "", []
+    out = render.render(html, os.path.join(utils.task_dir(task_id), "quiz.mp4"))
+    return (out, []) if out else ("", [])
+
+
+def render_ranking_video(
+    task_id, params, ranking, audio_file, subtitle_path, audio_duration,
+    video_terms=None,
+):
+    """Ranking mode: "Top N" countdown #N -> #1 with slamming rank badges.
+
+    Returns ``(video_path, caption_ranges)`` (``[]`` -> cards carry the text).
+    ``("", [])`` on any problem. ``ranking`` is the dict from
+    ``llm.generate_ranking``.
+    """
+    if not is_available():
+        logger.warning("hyperframes ranking enabled but toolchain not installed; run setup-hyperframes.bat")
+        return "", []
+    total = float(audio_duration or 0)
+    scene_list = _ranking_scene_list(ranking, total)
+    if not scene_list:
+        logger.warning("hyperframes ranking: no scenes; falling back to stock footage")
+        return "", []
+    width, height = _resolution(params)
+    subject = (getattr(params, "video_subject", "") or "").strip()
+    title = (ranking or {}).get("title", "")
+    assets.reset()
+    backgrounds = _solely_backgrounds(params, video_terms, _image_source(params))
+    from . import studio
+
+    html = studio.compose_ranking(
+        scene_list, subject, width, height, total, backgrounds=backgrounds, title=title
+    )
+    if not html:
+        logger.warning("hyperframes ranking: composition failed; falling back to stock footage")
+        return "", []
+    out = render.render(html, os.path.join(utils.task_dir(task_id), "ranking.mp4"))
+    return (out, []) if out else ("", [])
+
+
+def render_chat_video(
+    task_id, params, story, audio_file, subtitle_path, audio_duration,
+    video_terms=None,
+):
+    """Chat mode: a messenger-style two-person story, bubbles popping in synced.
+
+    Returns ``(video_path, caption_ranges)``; ``caption_ranges`` is ``[]`` (the
+    bubbles carry all the text, so no burned captions). ``("", [])`` on any
+    problem -> stock-footage fallback. ``story`` is the dict from
+    ``llm.generate_chat_story``.
+    """
+    if not is_available():
+        logger.warning("hyperframes chat enabled but toolchain not installed; run setup-hyperframes.bat")
+        return "", []
+    total = float(audio_duration or 0)
+    scene_list = _chat_scene_list(story, total)
+    if not scene_list:
+        logger.warning("hyperframes chat: no scenes; falling back to stock footage")
+        return "", []
+    width, height = _resolution(params)
+    subject = (getattr(params, "video_subject", "") or "").strip()
+    persons = (story or {}).get("persons") or []
+    title = (story or {}).get("title", "")
+    assets.reset()
+    from . import studio
+
+    html = studio.compose_chat(
+        scene_list, subject, width, height, total, persons=persons, title=title
+    )
+    if not html:
+        logger.warning("hyperframes chat: composition failed; falling back to stock footage")
+        return "", []
+    out = render.render(html, os.path.join(utils.task_dir(task_id), "chat.mp4"))
+    return (out, []) if out else ("", [])
+
+
 def _solely_backgrounds(params, video_terms, source, cap=5):
     """A small rotating set of real photos for solely mode (subject + terms)."""
     if not images_enabled():
@@ -413,5 +689,7 @@ def _preview_retry(task_id, html: str, scene_list, recompose) -> str:
 
 __all__ = [
     "is_enabled", "mode", "is_available", "images_enabled",
-    "render_video", "render_directed_video", "render_news_video", "ClipScene",
+    "render_video", "render_directed_video", "render_news_video",
+    "render_quiz_video", "render_ranking_video", "render_chat_video",
+    "quiz_narration", "ranking_narration", "chat_narration", "ClipScene",
 ]

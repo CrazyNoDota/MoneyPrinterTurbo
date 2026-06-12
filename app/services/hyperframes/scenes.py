@@ -7,17 +7,28 @@ audio duration -- the same character-length heuristic the non-edge TTS providers
 use for captions.
 """
 
+import math
 import re
 from dataclasses import dataclass
 from typing import List
 
 from loguru import logger
 
+from app.config import config
 from app.services import subtitle
 
 # A scene shorter than this reads as a flash in short-form video; merge tiny
 # fragments so the visual track has time to breathe.
 _MIN_SCENE_SECONDS = 1.2
+
+# A scene longer than this lets the visual track sit still too long, which hurts
+# retention. Long scenes are split at word/phrase boundaries into sequential
+# sub-scenes so the visual changes more often. Overridable via the
+# ``scene_max_seconds`` key in config.app (read with this default; not in
+# schema.py). Set <= 0 to disable splitting.
+_SCENE_MAX_SECONDS_DEFAULT = 4.0
+# Don't bother splitting off a tail shorter than _MIN_SCENE_SECONDS; the cap is
+# treated as a soft target so sub-scenes still read comfortably.
 
 
 @dataclass
@@ -156,6 +167,99 @@ def from_script(script: str, total_duration: float) -> List[Scene]:
     return scenes
 
 
+def _split_text_at_word_boundary(text: str, n_parts: int) -> List[str]:
+    """Split ``text`` into ``n_parts`` chunks at punctuation/word boundaries.
+
+    Prefers to break after internal punctuation (comma, semicolon, dash, etc.);
+    otherwise breaks at the nearest word boundary to an even character split.
+    Never splits a word and never drops/duplicates a token, so the joined parts
+    equal the original words. Returns fewer parts only if the text has too few
+    words to fill ``n_parts``.
+    """
+    words = text.split()
+    if n_parts <= 1 or len(words) <= 1:
+        return [text]
+    n_parts = min(n_parts, len(words))
+
+    # Character position (in the joined string) where each word ends, used to aim
+    # the cuts at even spacing; we then nudge each cut to the best nearby boundary.
+    parts: List[str] = []
+    start = 0
+    remaining = len(words)
+    for p in range(n_parts - 1):
+        slots_left = n_parts - p
+        # Even share of the remaining words for this chunk, at least one.
+        take = max(1, round(remaining / slots_left))
+        # Leave at least one word for every remaining slot.
+        take = min(take, remaining - (slots_left - 1))
+        end = start + take
+        # Nudge the boundary to follow a word that ends with punctuation, if one
+        # sits within the next/previous word -- a more natural phrase break.
+        for cand in (end, end - 1, end + 1):
+            if start < cand < len(words) and re.search(r"[,;:—–-]$", words[cand - 1]):
+                end = cand
+                break
+        end = max(start + 1, min(end, len(words) - (slots_left - 1)))
+        parts.append(" ".join(words[start:end]))
+        remaining -= end - start
+        start = end
+    parts.append(" ".join(words[start:]))
+    return [p for p in parts if p]
+
+
+def _split_long_scenes(items: List[Scene], cap: float) -> List[Scene]:
+    """Split any scene longer than ``cap`` into sequential sub-scenes.
+
+    Total timing is preserved exactly (sub-scene durations sum to the original
+    duration and start times stay contiguous). Text is divided at sensible
+    word/phrase boundaries. Scenes at or under the cap pass through untouched.
+    """
+    if cap <= 0 or not items:
+        return items
+    out: List[Scene] = []
+    for s in items:
+        if s.duration <= cap + 1e-6:
+            out.append(s)
+            continue
+        # How many pieces keep each sub-scene at or under the cap. Duration is
+        # apportioned to chunk text length, so an uneven split can still leave one
+        # chunk over the cap -- bump the part count until the longest chunk fits
+        # (bounded by the word count so we never split a word).
+        word_count = len(s.text.split())
+        n_parts = max(2, math.ceil(s.duration / cap))
+        chunks = _split_text_at_word_boundary(s.text, n_parts)
+        while n_parts < word_count:
+            total_w = sum(max(len(c), 1) for c in chunks)
+            longest = max(
+                s.duration * (max(len(c), 1) / total_w) for c in chunks
+            )
+            if longest <= cap + 1e-6:
+                break
+            n_parts += 1
+            chunks = _split_text_at_word_boundary(s.text, n_parts)
+        n = len(chunks)
+        if n <= 1:
+            out.append(s)
+            continue
+        # Distribute duration proportionally to chunk length, absorbing rounding
+        # drift into the final chunk so the sub-scenes sum to the original exactly.
+        weights = [max(len(c), 1) for c in chunks]
+        total_w = sum(weights)
+        # Accumulate rounded durations so the sub-scenes sum to the original
+        # exactly; the final chunk absorbs any rounding drift.
+        cursor = round(s.start, 3)
+        consumed = 0.0
+        for i, (chunk, w) in enumerate(zip(chunks, weights)):
+            if i == n - 1:
+                dur = round(s.duration - consumed, 3)
+            else:
+                dur = round(s.duration * (w / total_w), 3)
+            out.append(Scene(text=chunk, start=round(cursor, 3), duration=dur))
+            cursor += dur
+            consumed += dur
+    return out
+
+
 def build_scenes(script: str, srt_path: str, total_duration: float) -> List[Scene]:
     """Preferred entry point: subtitle timing first, script split as fallback."""
     scenes = from_subtitle(srt_path) if srt_path else []
@@ -165,6 +269,17 @@ def build_scenes(script: str, srt_path: str, total_duration: float) -> List[Scen
         source = "script (proportional timing)"
     else:
         scenes = _cover_total_duration(scenes, total_duration)
+
+    # Cap scene duration so the visual changes more often (retention). Read the
+    # override from config.app without touching schema.py/config files.
+    cap = float(config.app.get("scene_max_seconds", _SCENE_MAX_SECONDS_DEFAULT))
+    before = len(scenes)
+    scenes = _split_long_scenes(scenes, cap)
+    if len(scenes) != before:
+        logger.info(
+            f"hyperframes: split long scenes at {cap:.1f}s cap "
+            f"({before} -> {len(scenes)} scene(s))"
+        )
 
     if scenes:
         logger.info(

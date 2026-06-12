@@ -452,11 +452,16 @@ def _scene_tweens(spec: SceneSpec, idx: int) -> str:
             f'tl.fromTo("#bg-{idx}",{{scale:1.0}},'
             f'{{scale:1.09,duration:{dur},ease:"none"}},{start});'
         )
-    # Column in (rise + fade), staggered children for a kinetic feel.
-    js.append(
-        f'tl.fromTo("#scene-{idx} .line",{{autoAlpha:0,y:48}},'
-        f'{{autoAlpha:1,y:0,duration:0.55,stagger:0.06,ease:"power3.out"}},{round(start + 0.08, 3)});'
-    )
+    # Column in (rise + fade), staggered children for a kinetic feel. The very
+    # first scene is the hook — it must be fully readable at frame 0, so it
+    # skips the entrance animation entirely.
+    if start <= 0.001:
+        js.append(f'tl.set("#scene-{idx} .line",{{autoAlpha:1,y:0}},0);')
+    else:
+        js.append(
+            f'tl.fromTo("#scene-{idx} .line",{{autoAlpha:0,y:48}},'
+            f'{{autoAlpha:1,y:0,duration:0.55,stagger:0.06,ease:"power3.out"}},{round(start + 0.08, 3)});'
+        )
     if spec.archetype == "stat" and spec.number is not None:
         obj = f"c{idx}"
         fmt = (
@@ -630,9 +635,9 @@ def compose_news(scenes: List[Scene], subject: str, width: int, height: int,
             f'<span class="headline-text">{headline}</span></div></div>'
         )
 
+        # The headline is the hook — visible at frame 0, no drop-in delay.
         tweens = [
-            'tl.fromTo("#headline .headline-plate",{autoAlpha:0,y:-44},'
-            '{autoAlpha:1,y:0,duration:0.6,ease:"power3.out"},0.05);'
+            'tl.set("#headline .headline-plate",{autoAlpha:1,y:0},0);'
         ]
         for i, spec in enumerate(specs):
             tweens.append(_news_scene_tweens(spec, i))
@@ -653,6 +658,587 @@ def compose_news(scenes: List[Scene], subject: str, width: int, height: int,
     except Exception as exc:  # noqa: BLE001 - composition must never hard-fail a run
         logger.warning(f"hyperframes studio compose_news failed: {exc}")
         return ""
+
+
+# ---------------------------------------------------------------------------
+# "quiz" archetype: per-question Q card -> 3-2-1 countdown beat -> answer card.
+# The narration is a single continuous TTS track; the visual scene list is built
+# from the script's real SRT timings (see scenes.build_scenes upstream). The
+# countdown is a dedicated scene that lands on the spoken "three... two... one"
+# segment, so the visual countdown is audio-synced with no per-segment audio
+# surgery (see app.services.hyperframes.render_quiz_video for how the script is
+# assembled with that spoken cue between every question and its answer).
+# ---------------------------------------------------------------------------
+
+# A scene whose narration is the spoken countdown cue. Detected by the digits
+# pattern so the renderer can swap in the animated 3-2-1 visual. Matches lines
+# like "Three, two, one" / "3 2 1" / "Три... два... один".
+_COUNTDOWN_WORDS = (
+    "three", "two", "one", "три", "два", "один",
+)
+_COUNTDOWN_RE = re.compile(
+    r"^\W*(?:3\W+2\W+1|three\W+two\W+one|три\W+два\W+один)\W*$",
+    re.IGNORECASE,
+)
+
+
+def is_countdown_text(text: str) -> bool:
+    """True when a scene's narration is the quiz countdown cue."""
+    return bool(_COUNTDOWN_RE.match((text or "").strip()))
+
+
+_QUIZ_CSS = """
+__FONTS__
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:__W__px; height:__H__px; overflow:hidden;
+  background:#020617; font-family:__FAMILY__; font-weight:700; }
+#root { position:relative; width:__W__px; height:__H__px; }
+.clip { position:absolute; inset:0; }
+.bg-base { background:linear-gradient(160deg,#0f172a 0%,#020617 70%,#000 100%); }
+.bg-photo { width:100%; height:100%; object-fit:cover; will-change:transform; }
+.scrim { background:linear-gradient(180deg,rgba(2,6,23,.45) 0%,rgba(2,6,23,.6) 45%,rgba(2,6,23,.85) 100%); }
+.col { display:flex; flex-direction:column; align-items:center; justify-content:center;
+  text-align:center; padding:0 8%; gap:2.4vh; }
+.q-tag { background:__ACCENT__; color:#020617; font-size:clamp(26px,3.6vw,46px);
+  letter-spacing:.2em; padding:.35em 1em; border-radius:6px; }
+.q-text { color:#fff; font-size:clamp(48px,8vw,116px); line-height:1.1;
+  max-width:92%; text-shadow:0 4px 22px rgba(0,0,0,.7); }
+.cd-digit { color:__ACCENT__; font-size:clamp(220px,40vw,520px); line-height:.9;
+  text-shadow:0 8px 50px rgba(0,0,0,.6); will-change:transform,opacity; }
+.cd-ring { position:absolute; width:clamp(360px,62vw,760px); height:clamp(360px,62vw,760px);
+  border:clamp(8px,1.4vw,18px) solid rgba(255,212,0,.3); border-radius:50%;
+  top:50%; left:50%; transform:translate(-50%,-50%); }
+.a-tag { background:#16a34a; color:#fff; font-size:clamp(26px,3.6vw,46px);
+  letter-spacing:.2em; padding:.35em 1em; border-radius:6px; }
+.a-text { color:__ACCENT__; font-size:clamp(56px,9.2vw,140px); line-height:1.04;
+  letter-spacing:-.01em; max-width:92%; text-shadow:0 6px 30px rgba(0,0,0,.6); }
+.a-fact { color:#fff; font-size:clamp(34px,5vw,66px); line-height:1.18;
+  max-width:88%; text-shadow:0 3px 16px rgba(0,0,0,.7); }
+.reveal-wipe { position:absolute; inset:0; background:#16a34a; transform-origin:left center;
+  will-change:transform; }
+.line { will-change:transform,opacity; }
+"""
+
+
+def _quiz_role(text: str) -> str:
+    """Classify a quiz scene: 'countdown' | 'answer' | 'question'.
+
+    Answer scenes are tagged with a leading marker the renderer strips (see
+    render_quiz_video). Countdown scenes match the spoken 3-2-1 cue.
+    """
+    t = (text or "").strip()
+    if is_countdown_text(t):
+        return "countdown"
+    if t.startswith(_ANSWER_MARK):
+        return "answer"
+    return "question"
+
+
+# Zero-width marker prefixed onto answer narration so the composer can tell an
+# answer scene from a question scene without re-parsing the LLM JSON. It is a
+# normal-looking token that survives TTS/SRT round-trips ("A:" reads naturally).
+_ANSWER_MARK = "⁣"  # invisible separator; stripped before display
+
+
+def _quiz_scene_html(spec_scene: Scene, role: str, idx: int, background) -> str:
+    start = round(spec_scene.start, 3)
+    dur = round(spec_scene.duration, 3)
+    parts = []
+    if background is not None:
+        name = _asset_name(background)
+        if name:
+            parts.append(
+                f'<img id="qbg-{idx}" class="clip bg-photo" data-start="{start}" '
+                f'data-duration="{dur}" data-track-index="1" src="assets/{_esc(name)}">'
+            )
+            parts.append(
+                f'<div class="clip scrim" data-start="{start}" data-duration="{dur}" '
+                f'data-track-index="2"></div>'
+            )
+    text = spec_scene.text.lstrip(_ANSWER_MARK).strip()
+    if role == "countdown":
+        body = (
+            '<div class="cd-ring"></div>'
+            f'<div id="cd-{idx}" class="line cd-digit">3</div>'
+        )
+    elif role == "answer":
+        # answer text + optional fun fact split on the first " — " / " - "
+        fact = ""
+        for sep in (" — ", " – ", " - "):
+            if sep in text:
+                text, fact = text.split(sep, 1)
+                break
+        fact_html = f'<div class="line a-fact">{_esc(fact)}</div>' if fact.strip() else ""
+        body = (
+            f'<div class="reveal-wipe" id="wipe-{idx}"></div>'
+            '<div class="line a-tag">ANSWER</div>'
+            f'<div class="line a-text">{_esc(text)}</div>'
+            + fact_html
+        )
+    else:
+        body = (
+            '<div class="line q-tag">QUESTION</div>'
+            f'<div class="line q-text">{_esc(text)}</div>'
+        )
+    parts.append(
+        f'<div id="qscene-{idx}" class="clip col" data-start="{start}" '
+        f'data-duration="{dur}" data-track-index="3">{body}</div>'
+    )
+    return "\n    ".join(parts)
+
+
+def _quiz_scene_tweens(spec_scene: Scene, role: str, idx: int, background) -> str:
+    start = round(spec_scene.start, 3)
+    end = round(spec_scene.end, 3)
+    dur = round(spec_scene.duration, 3)
+    exit_at = round(max(start + 0.2, end - 0.4), 3)
+    js = []
+    if background is not None and _asset_name(background):
+        js.append(
+            f'tl.fromTo("#qbg-{idx}",{{scale:1.0}},'
+            f'{{scale:1.08,duration:{dur},ease:"none"}},{start});'
+        )
+    if role == "countdown":
+        # 3 -> 2 -> 1 across the scene; each digit pops then shrinks out. The
+        # ring sweeps once over the whole beat.
+        seg = round(dur / 3.0, 3)
+        for n, digit in enumerate((3, 2, 1)):
+            at = round(start + n * seg, 3)
+            js.append(
+                f'tl.set("#cd-{idx}",{{textContent:"{digit}"}},{at});'
+            )
+            js.append(
+                f'tl.fromTo("#cd-{idx}",{{scale:0.4,autoAlpha:0}},'
+                f'{{scale:1,autoAlpha:1,duration:{round(seg * 0.5, 3)},ease:"back.out(2)"}},{at});'
+            )
+            js.append(
+                f'tl.to("#cd-{idx}",{{scale:1.3,autoAlpha:0,duration:{round(seg * 0.4, 3)},'
+                f'ease:"power2.in"}},{round(at + seg * 0.55, 3)});'
+            )
+        js.append(
+            f'tl.fromTo("#qscene-{idx} .cd-ring",{{rotation:0,scale:0.8,autoAlpha:0.2}},'
+            f'{{rotation:360,scale:1.05,autoAlpha:0.6,duration:{dur},ease:"none"}},{start});'
+        )
+        return "\n    ".join(js)
+    if role == "answer":
+        # Green wipe sweeps across, then the answer slams in behind it.
+        js.append(
+            f'tl.fromTo("#wipe-{idx}",{{scaleX:0}},'
+            f'{{scaleX:1,duration:0.28,ease:"power2.in"}},{start});'
+        )
+        js.append(
+            f'tl.to("#wipe-{idx}",{{scaleX:0,transformOrigin:"right center",'
+            f'duration:0.3,ease:"power2.out"}},{round(start + 0.3, 3)});'
+        )
+        js.append(
+            f'tl.fromTo("#qscene-{idx} .line",{{autoAlpha:0,y:40}},'
+            f'{{autoAlpha:1,y:0,duration:0.5,stagger:0.08,ease:"power3.out"}},{round(start + 0.34, 3)});'
+        )
+        js.append(
+            f'tl.fromTo("#qscene-{idx} .a-text",{{scale:0.6}},'
+            f'{{scale:1,duration:0.45,ease:"back.out(1.6)"}},{round(start + 0.34, 3)});'
+        )
+    else:
+        js.append(
+            f'tl.fromTo("#qscene-{idx} .line",{{autoAlpha:0,y:48}},'
+            f'{{autoAlpha:1,y:0,duration:0.55,stagger:0.1,ease:"power3.out"}},{round(start + 0.08, 3)});'
+        )
+    js.append(
+        f'tl.to("#qscene-{idx}",{{autoAlpha:0,y:-28,duration:0.4,ease:"power2.in"}},{exit_at});'
+    )
+    return "\n    ".join(js)
+
+
+def compose_quiz(scenes: List[Scene], subject: str, width: int, height: int,
+                 total: float, backgrounds=None) -> str:
+    """Compose the deterministic "quiz" layout. ``""`` on any problem.
+
+    Each scene is one of: a question card, a 3-2-1 countdown beat, or an answer
+    reveal -- classified from its narration text (answer scenes carry an
+    invisible marker, countdown scenes match the spoken 3-2-1 cue).
+    """
+    try:
+        if not scenes or total <= 0:
+            return ""
+        css = _fill_css(_QUIZ_CSS, width, height)
+        total_r = round(total, 3)
+        bgs = list(backgrounds or [])
+        clips = [
+            f'<div class="clip bg-base" data-start="0" data-duration="{total_r}" data-track-index="0"></div>'
+        ]
+        tweens = []
+        for i, s in enumerate(scenes):
+            role = _quiz_role(s.text)
+            bg = bgs[i % len(bgs)] if bgs else None
+            clips.append(_quiz_scene_html(s, role, i, bg))
+            tweens.append(_quiz_scene_tweens(s, role, i, bg))
+        html = _document(css, total_r, width, height, clips, tweens)
+        logger.success(f"hyperframes studio: composed quiz layout ({len(scenes)} scene(s))")
+        return html
+    except Exception as exc:  # noqa: BLE001 - composition must never hard-fail a run
+        logger.warning(f"hyperframes studio compose_quiz failed: {exc}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# "ranking" archetype: "Top N" countdown #N -> #1 with a slamming rank badge.
+# ---------------------------------------------------------------------------
+
+# Rank narration carries an invisible marker + the rank number so the composer
+# can render the badge without re-parsing the LLM JSON. Form: ⁣<rank>⁣<text>.
+
+_RANK_RE = re.compile(rf"^{_ANSWER_MARK}(\d+){_ANSWER_MARK}(.*)$", re.DOTALL)
+
+
+def _rank_parts(text: str):
+    """``(rank:int, body:str)`` from a marked ranking scene, else ``None``."""
+    m = _RANK_RE.match((text or ""))
+    if not m:
+        return None
+    try:
+        return int(m.group(1)), m.group(2).strip()
+    except ValueError:
+        return None
+
+
+_RANK_CSS = """
+__FONTS__
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:__W__px; height:__H__px; overflow:hidden;
+  background:#020617; font-family:__FAMILY__; font-weight:700; }
+#root { position:relative; width:__W__px; height:__H__px; }
+.clip { position:absolute; inset:0; }
+.bg-base { background:linear-gradient(160deg,#0f172a 0%,#020617 70%,#000 100%); }
+.bg-photo { width:100%; height:100%; object-fit:cover; will-change:transform; }
+.scrim { background:linear-gradient(180deg,rgba(2,6,23,.45) 0%,rgba(2,6,23,.6) 45%,rgba(2,6,23,.85) 100%); }
+.col { display:flex; flex-direction:column; align-items:center; justify-content:center;
+  text-align:center; padding:0 8%; gap:2.2vh; }
+.title-wrap { display:flex; align-items:center; justify-content:center; padding:0 8%; }
+.title-text { color:#fff; font-size:clamp(56px,10vw,150px); line-height:1.05;
+  letter-spacing:-.01em; max-width:92%; text-shadow:0 6px 30px rgba(0,0,0,.7); }
+.rank-badge { display:flex; align-items:center; justify-content:center;
+  width:clamp(180px,30vw,360px); height:clamp(180px,30vw,360px); border-radius:50%;
+  background:__ACCENT__; color:#020617; font-size:clamp(110px,22vw,260px);
+  line-height:1; box-shadow:0 12px 50px rgba(0,0,0,.5); will-change:transform; }
+.rank-badge.gold { background:linear-gradient(160deg,#ffe066,#ffb300); }
+.rank-name { color:#fff; font-size:clamp(50px,8.4vw,124px); line-height:1.08;
+  max-width:92%; text-shadow:0 4px 22px rgba(0,0,0,.7); }
+.rank-reason { color:#fff; font-size:clamp(32px,4.8vw,62px); line-height:1.2;
+  max-width:88%; opacity:.92; text-shadow:0 3px 16px rgba(0,0,0,.7); }
+.line { will-change:transform,opacity; }
+"""
+
+
+def _rank_scene_html(s: Scene, idx: int, background, title: str) -> str:
+    start = round(s.start, 3)
+    dur = round(s.duration, 3)
+    parts = []
+    if background is not None:
+        name = _asset_name(background)
+        if name:
+            parts.append(
+                f'<img id="rbg-{idx}" class="clip bg-photo" data-start="{start}" '
+                f'data-duration="{dur}" data-track-index="1" src="assets/{_esc(name)}">'
+            )
+            parts.append(
+                f'<div class="clip scrim" data-start="{start}" data-duration="{dur}" '
+                f'data-track-index="2"></div>'
+            )
+    parsed = _rank_parts(s.text)
+    if parsed is None:
+        # Title / intro scene.
+        body = (
+            '<div class="title-wrap"><span class="line title-text">'
+            f'{_esc(title or s.text)}</span></div>'
+        )
+    else:
+        rank, body_text = parsed
+        name, reason = body_text, ""
+        for sep in (" — ", " – ", " - ", ": "):
+            if sep in body_text:
+                name, reason = body_text.split(sep, 1)
+                break
+        gold = " gold" if rank == 1 else ""
+        reason_html = (
+            f'<div class="line rank-reason">{_esc(reason)}</div>' if reason.strip() else ""
+        )
+        body = (
+            f'<div class="line rank-badge{gold}">#{rank}</div>'
+            f'<div class="line rank-name">{_esc(name)}</div>'
+            + reason_html
+        )
+    parts.append(
+        f'<div id="rscene-{idx}" class="clip col" data-start="{start}" '
+        f'data-duration="{dur}" data-track-index="3">{body}</div>'
+    )
+    return "\n    ".join(parts)
+
+
+def _rank_scene_tweens(s: Scene, idx: int, background) -> str:
+    start = round(s.start, 3)
+    end = round(s.end, 3)
+    dur = round(s.duration, 3)
+    exit_at = round(max(start + 0.2, end - 0.4), 3)
+    parsed = _rank_parts(s.text)
+    js = []
+    if background is not None and _asset_name(background):
+        js.append(
+            f'tl.fromTo("#rbg-{idx}",{{scale:1.0}},'
+            f'{{scale:1.08,duration:{dur},ease:"none"}},{start});'
+        )
+    if parsed is None:
+        js.append(
+            f'tl.fromTo("#rscene-{idx} .line",{{autoAlpha:0,scale:0.7}},'
+            f'{{autoAlpha:1,scale:1,duration:0.6,ease:"back.out(1.7)"}},{round(start + 0.08, 3)});'
+        )
+    else:
+        rank = parsed[0]
+        # #1 gets a heavier, later slam (suspense beat before it lands).
+        slam_at = round(start + (0.55 if rank == 1 else 0.1), 3)
+        js.append(
+            f'tl.fromTo("#rscene-{idx} .rank-badge",{{scale:2.2,autoAlpha:0,rotation:-12}},'
+            f'{{scale:1,autoAlpha:1,rotation:0,duration:0.45,ease:"back.out(2.2)"}},{slam_at});'
+        )
+        js.append(
+            f'tl.fromTo("#rscene-{idx} .rank-name, #rscene-{idx} .rank-reason",'
+            f'{{autoAlpha:0,y:40}},{{autoAlpha:1,y:0,duration:0.5,stagger:0.08,'
+            f'ease:"power3.out"}},{round(slam_at + 0.2, 3)});'
+        )
+    js.append(
+        f'tl.to("#rscene-{idx}",{{autoAlpha:0,y:-28,duration:0.4,ease:"power2.in"}},{exit_at});'
+    )
+    return "\n    ".join(js)
+
+
+def compose_ranking(scenes: List[Scene], subject: str, width: int, height: int,
+                    total: float, backgrounds=None, title: str = "") -> str:
+    """Compose the deterministic "ranking" (Top-N countdown) layout. ``""`` on any problem."""
+    try:
+        if not scenes or total <= 0:
+            return ""
+        css = _fill_css(_RANK_CSS, width, height)
+        total_r = round(total, 3)
+        bgs = list(backgrounds or [])
+        clips = [
+            f'<div class="clip bg-base" data-start="0" data-duration="{total_r}" data-track-index="0"></div>'
+        ]
+        tweens = []
+        for i, s in enumerate(scenes):
+            bg = bgs[i % len(bgs)] if bgs else None
+            clips.append(_rank_scene_html(s, i, bg, title))
+            tweens.append(_rank_scene_tweens(s, i, bg))
+        html = _document(css, total_r, width, height, clips, tweens)
+        logger.success(f"hyperframes studio: composed ranking layout ({len(scenes)} scene(s))")
+        return html
+    except Exception as exc:  # noqa: BLE001 - composition must never hard-fail a run
+        logger.warning(f"hyperframes studio compose_ranking failed: {exc}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# "chat" archetype: messenger-style story. ONE persistent composition -- a phone
+# frame (header with avatar + contact name) over a scrollable message column.
+# Bubbles pop in one at a time, synced to the narration; a typing indicator
+# flashes briefly before each incoming bubble; the column auto-scrolls so the
+# newest bubble stays in view.
+#
+# Unlike the per-scene formats (quiz/ranking), the chat does NOT clear between
+# scenes -- bubbles accumulate. So this is built as a single timeline driving
+# per-message tweens, not a scene-clears-scene sequence. Timing comes from the
+# proportional scene list (one Scene per message; see _chat_scene_list upstream),
+# so each bubble lands on the segment of narration that reads it.
+# ---------------------------------------------------------------------------
+
+# Invisible per-message marker: ⁣<side>⁣<text>, side 0/1 (left/right). Lets the
+# composer recover each message's side after the TTS/SRT scene round-trip without
+# re-parsing the LLM JSON (same trick as the quiz answer / rank markers).
+_CHAT_RE = re.compile(rf"^{_ANSWER_MARK}([01]){_ANSWER_MARK}(.*)$", re.DOTALL)
+
+
+def _chat_parts(text: str):
+    """``(side:int 0|1, body:str)`` from a marked chat scene, else ``None``."""
+    m = _CHAT_RE.match(text or "")
+    if not m:
+        return None
+    return int(m.group(1)), m.group(2).strip()
+
+
+_CHAT_CSS = """
+__FONTS__
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:__W__px; height:__H__px; overflow:hidden;
+  background:#0b141a; font-family:__FAMILY__; font-weight:600; }
+#root { position:relative; width:__W__px; height:__H__px; }
+.clip { position:absolute; inset:0; }
+.bg-base { background:linear-gradient(160deg,#101b22 0%,#0b141a 70%,#05080a 100%); }
+.bg-photo { width:100%; height:100%; object-fit:cover; will-change:transform; }
+.scrim { background:rgba(7,12,15,.78); }
+.chat-header { position:absolute; top:0; left:0; right:0; height:11%;
+  display:flex; align-items:center; gap:3.4%; padding:0 5%;
+  background:rgba(13,24,30,.96); box-shadow:0 4px 20px rgba(0,0,0,.45);
+  border-bottom:1px solid rgba(255,255,255,.06); z-index:5; }
+.avatar { flex:0 0 auto; display:flex; align-items:center; justify-content:center;
+  width:clamp(96px,13vw,150px); height:clamp(96px,13vw,150px); border-radius:50%;
+  background:linear-gradient(150deg,#25d366,#128c7e); color:#fff;
+  font-size:clamp(44px,6vw,72px); }
+.contact { display:flex; flex-direction:column; }
+.contact-name { color:#fff; font-size:clamp(40px,5.6vw,68px); line-height:1.05; }
+.contact-status { color:#8aa0aa; font-size:clamp(24px,3.2vw,38px); line-height:1.2; }
+.chat-window { position:absolute; top:11%; left:0; right:0; bottom:0;
+  overflow:hidden; }
+.msg-col { position:absolute; left:0; right:0; bottom:0;
+  display:flex; flex-direction:column; gap:2.2vh; padding:4% 5% 6%;
+  will-change:transform; }
+.bubble { max-width:78%; padding:.62em .8em; border-radius:26px;
+  font-size:clamp(42px,5.8vw,72px); line-height:1.22; color:#fff;
+  box-shadow:0 4px 16px rgba(0,0,0,.4); will-change:transform,opacity;
+  word-wrap:break-word; }
+.bubble.left { align-self:flex-start; background:#202c33;
+  border-bottom-left-radius:8px; }
+.bubble.right { align-self:flex-end; background:#005c4b;
+  border-bottom-right-radius:8px; }
+.typing { align-self:flex-start; display:flex; align-items:center; gap:.32em;
+  padding:.9em 1em; border-radius:26px; border-bottom-left-radius:8px;
+  background:#202c33; will-change:opacity; }
+.typing.right { align-self:flex-end; border-bottom-left-radius:26px;
+  border-bottom-right-radius:8px; background:#005c4b; }
+.dot { width:clamp(14px,1.8vw,22px); height:clamp(14px,1.8vw,22px);
+  border-radius:50%; background:#8aa0aa; }
+"""
+
+# Rough per-bubble height estimate (px) used to auto-scroll deterministically
+# without measuring the DOM: a base row plus one extra line per ~22 chars.
+_CHAT_ROW_BASE = 130
+_CHAT_ROW_PER_LINE = 96
+_CHAT_LINE_CHARS = 22
+
+
+def _chat_bubble_height(text: str) -> int:
+    lines = max(1, (len(text or "") + _CHAT_LINE_CHARS - 1) // _CHAT_LINE_CHARS)
+    return _CHAT_ROW_BASE + (lines - 1) * _CHAT_ROW_PER_LINE
+
+
+def compose_chat(scenes: List[Scene], subject: str, width: int, height: int,
+                 total: float, persons=None, title: str = "") -> str:
+    """Compose the deterministic messenger "chat" layout. ``""`` on any problem.
+
+    One persistent phone frame: a header (contact name + avatar initial) over a
+    message column. Each scene is one message (its side recovered from an
+    invisible marker); bubbles pop in at their narrated time, a typing indicator
+    flashes before each incoming (left) bubble, and the column scrolls up so the
+    latest bubble stays visible. The cards carry all the text -> no burned
+    captions (the caller returns ``caption_ranges = []``).
+    """
+    try:
+        if not scenes or total <= 0:
+            return ""
+        persons = list(persons or [])
+        contact = (persons[0] if persons else (title or subject) or "Chat").strip() or "Chat"
+        initial = _esc(contact[:1].upper() or "?")
+        css = _fill_css(_CHAT_CSS, width, height)
+        total_r = round(total, 3)
+
+        bubbles = []
+        tweens = []
+        # Cumulative column height so we can scroll the newest bubble into view.
+        cum_h = 0
+        offsets = []  # (top_offset_before_this_bubble, height)
+        for s in scenes:
+            parsed = _chat_parts(s.text)
+            text = parsed[1] if parsed else (s.text or "").strip()
+            offsets.append((cum_h, _chat_bubble_height(text)))
+            cum_h += _chat_bubble_height(text)
+
+        # Visible window height (below the header) in px.
+        window_h = max(int(height * 0.89), 1)
+
+        for i, s in enumerate(scenes):
+            parsed = _chat_parts(s.text)
+            side = (parsed[0] if parsed else (i % 2)) and 1 or 0
+            text = parsed[1] if parsed else (s.text or "").strip()
+            side_cls = "right" if side == 1 else "left"
+            bubbles.append(
+                f'<div id="msg-{i}" class="bubble {side_cls}">{_esc(text)}</div>'
+            )
+
+            start = round(s.start, 3)
+            # Incoming (left) bubbles get a short typing indicator just before.
+            typing_id = ""
+            if side == 0:
+                typing_id = f"typing-{i}"
+                bubbles.append(
+                    f'<div id="{typing_id}" class="typing {side_cls}">'
+                    '<span class="dot"></span><span class="dot"></span>'
+                    '<span class="dot"></span></div>'
+                )
+                type_dur = round(min(0.6, max(0.2, s.duration * 0.3)), 3)
+                tweens.append(
+                    f'tl.fromTo("#{typing_id}",{{autoAlpha:0}},'
+                    f'{{autoAlpha:1,duration:0.18,ease:"power1.out"}},{start});'
+                )
+                tweens.append(
+                    f'tl.to("#{typing_id}",{{autoAlpha:0,height:0,margin:0,padding:0,'
+                    f'duration:0.18,ease:"power1.in"}},{round(start + type_dur, 3)});'
+                )
+                pop_at = round(start + type_dur, 3)
+            else:
+                pop_at = start
+
+            tweens.append(
+                f'tl.fromTo("#msg-{i}",{{autoAlpha:0,scale:0.6,y:24,'
+                f'transformOrigin:"{"right bottom" if side else "left bottom"}"}},'
+                f'{{autoAlpha:1,scale:1,y:0,duration:0.34,ease:"back.out(1.7)"}},{pop_at});'
+            )
+            # Auto-scroll: translate the column up so the bottom of this bubble
+            # sits at the bottom of the window (only once the stack exceeds it).
+            bottom_of_bubble = offsets[i][0] + offsets[i][1]
+            scroll = max(0, bottom_of_bubble - window_h)
+            tweens.append(
+                f'tl.to("#msg-col",{{y:{-scroll},duration:0.3,ease:"power2.out"}},{pop_at});'
+            )
+
+        col = '<div id="msg-col" class="msg-col">' + "".join(bubbles) + "</div>"
+        header = (
+            '<div class="chat-header">'
+            f'<div class="avatar">{initial}</div>'
+            f'<div class="contact"><span class="contact-name">{_esc(contact)}</span>'
+            '<span class="contact-status">online</span></div></div>'
+        )
+        clips = [
+            f'<div class="clip bg-base" data-start="0" data-duration="{total_r}" data-track-index="0"></div>',
+            f'<div class="clip chat-window" data-start="0" data-duration="{total_r}" '
+            f'data-track-index="3">{col}</div>',
+            f'<div class="clip" data-start="0" data-duration="{total_r}" '
+            f'data-track-index="4">{header}</div>',
+        ]
+        # Persistent typing-dot bounce loop (visual only; clamped within the timeline).
+        bounce = (
+            'tl.to(".dot",{y:-10,duration:0.3,repeat:-1,yoyo:true,'
+            'stagger:0.12,ease:"sine.inOut"},0);'
+        )
+        tweens.insert(0, bounce)
+        html = _document(css, total_r, width, height, clips, tweens)
+        logger.success(f"hyperframes studio: composed chat layout ({len(scenes)} message(s))")
+        return html
+    except Exception as exc:  # noqa: BLE001 - composition must never hard-fail a run
+        logger.warning(f"hyperframes studio compose_chat failed: {exc}")
+        return ""
+
+
+def _document(css: str, total_r: float, width: int, height: int,
+              clips: List[str], tweens: List[str]) -> str:
+    """Assemble the shared hyperframes HTML document (head + clips + timeline)."""
+    return (
+        "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+        f'<script src="{_GSAP}"></script>\n<style>{css}</style>\n</head>\n<body>\n'
+        f'<div id="root" data-composition-id="main" data-start="0" '
+        f'data-duration="{total_r}" data-width="{width}" data-height="{height}">\n  '
+        + "\n  ".join(clips)
+        + "\n</div>\n<script>\nwindow.__timelines = window.__timelines || {};\n"
+        "const tl = gsap.timeline({ paused: true });\n    "
+        + "\n    ".join(tweens)
+        + '\nwindow.__timelines["main"] = tl;\n</script>\n</body>\n</html>\n'
+    )
 
 
 def compose(scenes: List[Scene], subject: str, width: int, height: int,

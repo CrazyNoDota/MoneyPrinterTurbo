@@ -76,9 +76,13 @@ class TestScenes(unittest.TestCase):
         srt = [(1, "00:00:00,000 --> 00:00:03,000", "From srt")]
         with mock.patch.object(scenes.subtitle, "file_to_subtitles", return_value=srt):
             built = scenes.build_scenes("ignored script.", "dummy.srt", 10.0)
-        self.assertEqual(len(built), 1)
-        self.assertEqual(built[0].text, "From srt")
-        self.assertAlmostEqual(built[0].duration, 10.0)
+        # Subtitle timing is preferred over the raw script. The WP6 scene-duration
+        # cap may split this 10s cue into sub-scenes, but the text comes from the
+        # SRT (not the script) and the timeline still sums to the audio duration.
+        self.assertGreaterEqual(len(built), 1)
+        self.assertEqual(" ".join(s.text for s in built), "From srt")
+        self.assertAlmostEqual(sum(s.duration for s in built), 10.0, places=2)
+        self.assertAlmostEqual(built[-1].end, 10.0, places=2)
 
     def test_build_scenes_expands_subtitle_gaps_to_audio_duration(self):
         srt = [

@@ -234,6 +234,47 @@ def generate_script(task_id, params, material_hints=None):
     return video_script
 
 
+def generate_quiz_or_ranking(task_id, params, hf_mode):
+    """Generate the structured quiz/ranking/chat data + its narration, or fall back.
+
+    Handles the structured-script formats (``quiz``, ``ranking``, ``chat``): each
+    asks the LLM for strict JSON and builds its own continuous narration from it.
+
+    Returns ``(video_script, structured_dict)``. On any LLM/JSON failure both are
+    derived as best-effort: ``structured_dict`` is ``None`` and the caller keeps
+    the regular subject-driven script path (non-fatal degradation -- task.py then
+    renders a normal video instead of the structured format).
+    """
+    subject = (params.video_subject or "").strip()
+    language = params.video_language or ""
+    structured = None
+    script = ""
+    try:
+        if hf_mode == "quiz":
+            structured = llm.generate_quiz(video_subject=subject, language=language)
+            if structured:
+                script = hyperframes.quiz_narration(structured)
+        elif hf_mode == "ranking":
+            structured = llm.generate_ranking(video_subject=subject, language=language)
+            if structured:
+                script = hyperframes.ranking_narration(structured)
+        elif hf_mode == "chat":
+            structured = llm.generate_chat_story(video_subject=subject, language=language)
+            if structured:
+                script = hyperframes.chat_narration(structured)
+    except Exception as e:  # noqa: BLE001 - never crash the pipeline over a format
+        logger.warning(f"{hf_mode} generation failed, falling back to normal script: {e}")
+        structured = None
+        script = ""
+
+    if not structured or not script.strip():
+        logger.warning(
+            f"{hf_mode} content unavailable; falling back to the regular script path"
+        )
+        return None, None
+    return script, structured
+
+
 def generate_terms(task_id, params, video_script, material_hints=None):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
@@ -660,11 +701,27 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     # needed for video assembly even when the script is reused.
     augment_with_pinterest(params)
 
+    # Resolve the visual mode up front: the quiz/ranking formats need a special
+    # narration script (built from structured LLM JSON) generated BEFORE TTS, so
+    # the audio carries the question/countdown/answer (or Top-N) beats.
+    hf_mode = hyperframes.mode(params)
+    # Structured quiz/ranking data (dict) when those formats produced content;
+    # None otherwise (including after a non-fatal fallback to the normal path).
+    hf_content = None
+
     # 1. Generate script (or reuse the cached one).
     if cached_script:
         logger.info("resuming: reusing cached script + terms from a previous run")
         video_script = cached_script
         material_hints = None
+    elif hf_mode in ("quiz", "ranking", "chat"):
+        material_hints = None
+        video_script, hf_content = generate_quiz_or_ranking(task_id, params, hf_mode)
+        if not video_script:
+            # Fall back to the regular subject-driven script; downstream render
+            # then treats this as a normal hyperframes/footage video.
+            hf_mode = "footage"
+            video_script = generate_script(task_id, params)
     else:
         # Understand the local materials once (vision descriptions or file names)
         # and reuse the hints for both the script and the stock search terms.
@@ -763,8 +820,36 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     # None => solely mode (suppress all burned captions); a list => mixed/news
     # mode (caption only the (start, end) ranges in the list).
     hf_footage_ranges = None
-    hf_mode = hyperframes.mode(params)
-    if hf_mode == "mixed":
+    # hf_mode was resolved up front (quiz/ranking may have downgraded to
+    # "footage" after a non-fatal content fallback).
+    if hf_mode == "quiz" and hf_content:
+        hf_video, hf_footage_ranges = hyperframes.render_quiz_video(
+            task_id, params, hf_content, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes quiz produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "ranking" and hf_content:
+        hf_video, hf_footage_ranges = hyperframes.render_ranking_video(
+            task_id, params, hf_content, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes ranking produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "chat" and hf_content:
+        hf_video, hf_footage_ranges = hyperframes.render_chat_video(
+            task_id, params, hf_content, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes chat produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "mixed":
         # Director: LLM tags each scene footage vs motion-graphics; footage stays
         # native, MG scenes are rendered, and the segments are stitched in order.
         hf_video, hf_footage_ranges = hyperframes.render_directed_video(
