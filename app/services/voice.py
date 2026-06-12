@@ -1209,6 +1209,106 @@ def is_qwen_voice(voice_name: str):
     return voice_name.startswith("qwen:")
 
 
+def azure_speech_configured() -> bool:
+    """Whether an Azure Speech key + region are set (enables azure-v2 voices)."""
+    return bool(config.azure.get("speech_key", "")) and bool(
+        config.azure.get("speech_region", "")
+    )
+
+
+def normalize_language(language: str) -> str:
+    """Map a language tag ("ru", "ru-RU", "EN") to "ru"/"en", else ""."""
+    lang = (language or "").strip().lower()
+    if lang.startswith("ru"):
+        return "ru"
+    if lang.startswith("en"):
+        return "en"
+    return ""
+
+
+# Built-in voice pairs per language: (primary azure-v2, key-less fallback).
+# The primary needs [azure].speech_key; the fallback runs without any cloud key
+# (RU -> local Qwen3-TTS, EN -> edge-tts). Overridable via voice_{lang}_* config.
+_LANGUAGE_VOICES = {
+    "ru": ("ru-RU-DmitryNeural-V2-Male", "qwen:Russian:ryan-Male"),
+    "en": ("en-US-AndrewMultilingualNeural-V2-Male", "en-US-AndrewNeural-Male"),
+}
+
+
+def _voice_language(voice_name: str) -> str:
+    """Best-effort language of a voice name ("ru", "en", "zh", ...), or ""
+    when it cannot be told (multilingual/unknown providers)."""
+    name = (voice_name or "").strip()
+    if is_qwen_voice(name):
+        parts = name.split(":")
+        segment = parts[1] if len(parts) > 1 else ""
+        return {"russian": "ru", "english": "en"}.get(
+            segment.strip().lower(), normalize_language(segment)
+        )
+    if is_silero_voice(name):
+        return "ru" if "_ru" in name.lower() else ""
+    if is_siliconflow_voice(name) or is_gemini_voice(name):
+        return ""
+    # Locale-prefixed names: ru-RU-DmitryNeural, en-US-AndrewNeural-V2, ...
+    if re.match(r"^[a-zA-Z]{2}-[a-zA-Z]{2,4}-\w", name):
+        return name[:2].lower()
+    return ""
+
+
+def azure_voice_basename(voice_name: str) -> str:
+    """Bare Azure/edge voice name ("ru-RU-DmitryNeural") from any tag form
+    (gender suffix and -V2 stripped), or "" for non-locale voices (qwen:, ...).
+
+    Used to point the Azure avatar's built-in TTS at the same voice the
+    pipeline narrates with, so the presenter's lips track the narration.
+    """
+    name = parse_voice_name(voice_name or "")
+    name = is_azure_v2_voice(name) or name
+    if re.match(r"^[a-zA-Z]{2}-[a-zA-Z]{2,4}-\w", name):
+        return name
+    return ""
+
+
+def voice_candidates(language: str = "", voice_name: str = "") -> list:
+    """Ordered TTS voices to try for this task (the RU/EN language switch).
+
+    Without a recognized ``language`` this is just ``[voice_name]`` -- legacy
+    behavior. With "ru"/"en" (any tag form) the per-language chain applies:
+    Azure Neural TTS (azure-v2) primary when a speech key is configured, then a
+    key-less fallback (RU -> local Qwen3-TTS, EN -> edge-tts). An explicitly
+    chosen ``voice_name`` leads when its language matches (or is unknown);
+    a mismatched one is demoted to last resort instead of dropped.
+    """
+    lang = normalize_language(language)
+    explicit = parse_voice_name(voice_name) if voice_name else ""
+    chain = []
+    explicit_leads = explicit and (not lang or _voice_language(explicit) in ("", lang))
+    # An azure-v2 voice cannot synthesize without a speech key -- demote it so
+    # the key-less fallback goes first instead of burning a doomed attempt.
+    if lang and explicit and is_azure_v2_voice(explicit) and not azure_speech_configured():
+        explicit_leads = False
+    if explicit_leads:
+        chain.append(explicit)
+    if lang:
+        default_primary, default_fallback = _LANGUAGE_VOICES[lang]
+        primary = str(config.app.get(f"voice_{lang}_primary", default_primary) or "")
+        fallback = str(config.app.get(f"voice_{lang}_fallback", default_fallback) or "")
+        if primary and (not is_azure_v2_voice(primary) or azure_speech_configured()):
+            chain.append(parse_voice_name(primary))
+        if fallback:
+            chain.append(parse_voice_name(fallback))
+    if explicit and explicit not in chain:
+        chain.append(explicit)
+
+    seen = set()
+    ordered = []
+    for name in chain:
+        if name and name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
 def tts(
     text: str,
     voice_name: str,
@@ -2347,6 +2447,60 @@ def _build_subtitle_items_from_legacy_submaker(
     return sub_items
 
 
+def _extract_word_timings_from_submaker(sub_maker: SubMaker) -> list:
+    """Pull per-word ``{text, start, end}`` (seconds) out of a SubMaker.
+
+    edge_tts 7.x exposes fine-grained ``cues`` (one per word/phrase boundary);
+    the project's other TTS paths fall back to the legacy ``subs``/``offset``
+    structure (100-ns units). Returns ``[]`` when neither carries usable timing.
+    """
+    words = []
+    try:
+        if hasattr(sub_maker, "cues") and sub_maker.cues:
+            for cue in sub_maker.cues:
+                text = unescape(cue.content or "").strip()
+                if not text:
+                    continue
+                words.append(
+                    {
+                        "text": text,
+                        "start": float(cue.start.total_seconds()),
+                        "end": float(cue.end.total_seconds()),
+                    }
+                )
+            return words
+
+        legacy_offsets = getattr(sub_maker, "offset", [])
+        legacy_subs = getattr(sub_maker, "subs", [])
+        for offset, sub in zip(legacy_offsets, legacy_subs):
+            text = unescape(sub or "").strip()
+            if not text:
+                continue
+            start, end = offset
+            words.append(
+                {
+                    "text": text,
+                    "start": float(start) / 10000000,
+                    "end": float(end) / 10000000,
+                }
+            )
+    except Exception as e:
+        logger.warning(f"failed to extract word timings from sub_maker: {str(e)}")
+        return []
+    return words
+
+
+def _write_words_sidecar(sub_maker: SubMaker, subtitle_file: str) -> None:
+    """Write the karaoke word-timing sidecar next to ``subtitle_file`` (non-fatal)."""
+    try:
+        from app.services import subtitle as subtitle_service
+
+        words = _extract_word_timings_from_submaker(sub_maker)
+        subtitle_service.write_words_sidecar(subtitle_file, words)
+    except Exception as e:
+        logger.warning(f"failed to write word-timing sidecar: {str(e)}")
+
+
 def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
     """
     优化字幕文件
@@ -2370,7 +2524,9 @@ def create_subtitle(sub_maker: SubMaker, text: str, subtitle_file: str):
             )
             return
 
-        _write_subtitle_items(sub_items, subtitle_file)
+        if _write_subtitle_items(sub_items, subtitle_file):
+            # Emit the karaoke word-timing sidecar from the same SubMaker.
+            _write_words_sidecar(sub_maker, subtitle_file)
     except Exception as e:
         logger.error(f"failed, error: {str(e)}")
 

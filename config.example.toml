@@ -168,6 +168,10 @@ resume = true
 #   fal       -> fal.ai queue API        (set video_gen_api_key + video_gen_model=<route e.g. fal-ai/ltx-video>)
 #   http      -> your own GPU service (Google Cloud Run+GPU / Modal / RunPod);
 #                set video_gen_endpoint to a server exposing POST /submit + GET /status/{job}
+#   azure-sora-> Azure OpenAI Sora (runs on the startup credits). Set
+#                video_gen_endpoint = "https://<resource>.openai.azure.com" and
+#                video_gen_api_key; video_gen_model defaults to "sora".
+#                ⚠️ Azure sunsets this API on 2026-09-24 -- after that switch back to null.
 # mode: image2video animates the on-theme photos we already fetch (cheaper, more
 #       coherent); text2video generates from the search terms. image2video is used
 #       automatically whenever an init image is available.
@@ -181,6 +185,148 @@ video_gen_max_clips = 4       # hard cap on clips generated per video
 video_gen_max_seconds = 60    # hard cap on total generated seconds per video
 video_gen_timeout = 300       # seconds to wait for a single clip before giving up
 video_gen_poll_interval = 5   # seconds between status polls
+
+########## Talking head
+# Optional presenter video layer, used by video_visual_mode = "news" (a talking
+# head composited into a corner of the news layout). All failures are non-fatal:
+# the news video is still produced without the head, with burned captions instead.
+#
+# provider:
+#   auto    -> Azure TTS Avatar first, then Wav2Lip fallback
+#   azure   -> Azure TTS Avatar batch API only
+#   wav2lip -> local audio+portrait lip sync only
+#
+# Azure uses the existing [azure].speech_key and [azure].speech_region values
+# below. Do not duplicate those credentials in this block.
+avatar_enabled = false
+avatar_provider = "auto"
+avatar_character = "lisa"              # Azure standard avatar catalog character
+avatar_style = "casual-sitting"        # Azure standard avatar style
+# Voice for the Azure avatar's built-in TTS. Leave empty to follow the voice
+# the pipeline actually narrated with (best lip sync); set it only to force a
+# specific Azure voice. Mismatched voices drift out of sync.
+avatar_voice = ""
+avatar_portrait = ""                   # portrait photo path for Wav2Lip/custom photo
+avatar_prefer_alpha = true             # use webm/vp9+transparent when confirmed available
+avatar_alpha_supported = false         # set true only in regions/accounts that support it
+avatar_fps = 25
+avatar_timeout = 900
+avatar_poll_interval = 5
+avatar_azure_api_version = "3.1-preview1"
+avatar_azure_endpoint = ""             # override full Azure endpoint only if needed
+
+# Wav2Lip fallback. Run setup-avatar.bat once to create .venv-wav2lip, clone the
+# reference Wav2Lip repo, and download wav2lip_gan.pth. Missing pieces simply
+# make the provider return "".
+wav2lip_python = ""                    # override .venv-wav2lip interpreter
+wav2lip_repo = ""                      # override .wav2lip/Wav2Lip
+wav2lip_script = ""                    # override inference.py
+wav2lip_weights = ""                   # override models/wav2lip/wav2lip_gan.pth
+wav2lip_timeout = 1800
+wav2lip_resize_factor = ""
+
+# Where the presenter sits in the news layout (video_visual_mode = "news"). The
+# lower-third plate stays in the lower-left, so bottom-right is the safe default.
+news_presenter_scale = 0.38            # presenter width as a fraction of frame width
+news_presenter_position = "bottom-right"  # bottom-right | bottom-left | top-right | top-left
+news_presenter_margin = 0.04           # corner inset as a fraction of frame width
+
+########## News sources (for the news-video pipeline)
+# news.latest() walks these in priority order and uses the first source that
+# yields items: Threads profiles first (scraped from the public profile page --
+# fragile by nature), then RSS feeds (stable fallback). Everything degrades to
+# an empty list, never crashes the pipeline.
+news_threads_profiles = []             # e.g. ["bbcnews", "rbc_ru"] (usernames, no @)
+news_rss_feeds = [
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    # RU examples: "https://lenta.ru/rss/news", "https://www.vedomosti.ru/rss/news"
+]
+news_fetch_timeout = 15                # seconds per HTTP request
+
+########## Language switch (RU/EN voices)
+# When a task's video_language is Russian or English (any tag form: "ru",
+# "ru-RU", "en-US", ...), the pipeline picks the TTS voice automatically and
+# retries down the chain on failure:
+#   primary  = Azure Neural TTS (azure-v2), used only when [azure].speech_key
+#              and speech_region below are set
+#   fallback = key-less voice: RU -> local Qwen3-TTS (run setup-qwen.bat once),
+#              EN -> free edge-tts
+# An explicitly chosen voice_name still leads when it matches the language;
+# a mismatched one is demoted to last resort instead of dropped. Without a
+# recognized video_language, voice_name is used alone (legacy behavior).
+voice_ru_primary = "ru-RU-DmitryNeural-V2-Male"
+voice_ru_fallback = "qwen:Russian:ryan-Male"
+voice_en_primary = "en-US-AndrewMultilingualNeural-V2-Male"
+voice_en_fallback = "en-US-AndrewNeural-Male"
+
+########## Hyperframes (motion-graphics video)
+# Build the whole video from motion graphics instead of stock footage: an LLM
+# authors an HTML/GSAP composition (kinetic typography, animated numbers/lists)
+# timed to the TTS narration, and hyperframes renders it to MP4 locally (headless
+# Chrome + ffmpeg). Great for text-driven explainer/finance shorts; not a
+# replacement for scenic b-roll. Run setup-hyperframes.bat once to install the
+# toolchain. All failures are non-fatal -- the pipeline falls back to stock footage.
+# video_visual_mode selects how the visual track is built (overrides hyperframes_enabled):
+#   "footage"     stock/local footage only (default)
+#   "hyperframes" solely motion-graphics, timed to the narration
+#   "mixed"       the "director": the LLM tags each scene as real footage or motion
+#                 graphics; footage scenes stay native, MG scenes are rendered, and the
+#                 segments are stitched together in order.
+#   "news"        deterministic news layout: persistent headline plate + per-scene
+#                 lower-third over a motion background, with an optional talking-head
+#                 presenter in a corner (see the Talking head block above). Captions
+#                 are burned only when no presenter could be produced.
+## quiz/ranking ## ----------------------------------------------------------
+#   "quiz"        trivia format: the LLM writes N questions as strict JSON; per question
+#                 the video shows a question card, an animated 3-2-1 countdown beat (the
+#                 narration speaks "three... two... one..." so the beat is audio-synced),
+#                 then an answer-reveal card with a one-line fun fact.
+#   "ranking"     "Top N" countdown: the LLM writes a ranked Top-N list as strict JSON;
+#                 the video counts down #N -> #1 with slamming rank badges and a suspense
+#                 beat before #1.
+#   "chat"        messenger story: the LLM writes a two-person SMS dialogue as strict JSON
+#                 (hook -> escalation -> twist); rendered as a phone chat where bubbles pop
+#                 in one at a time, synced to a single-voice narration of the exchange.
+# Both build their own narration from structured LLM JSON; any LLM/JSON failure degrades
+# non-fatally to the regular subject-driven script + normal visual track.
+## end quiz/ranking ## ------------------------------------------------------
+# Leave empty to fall back to hyperframes_enabled below.
+video_visual_mode = ""
+hyperframes_enabled = false   # solely-hyperframes mode (equivalent to video_visual_mode="hyperframes")
+# Authoring engine for motion-graphics compositions:
+#   "studio"   -> deterministic templates (default): each scene is classified into an
+#                 archetype (stat counter / kinetic statement) and rendered from
+#                 hardened templates -- no overlapping text, no black frames, no LLM in
+#                 the layout loop. Most reliable for production.
+#   "freeform" -> the LLM authors the whole HTML/CSS/GSAP document (more creative,
+#                 less predictable). Studio falls back to this automatically if it ever
+#                 fails to produce a valid composition.
+hyperframes_engine = "studio"
+# Maximum scene duration (seconds) for motion-graphics modes. Long scenes are
+# split at word/phrase boundaries so the visual changes more often (retention).
+# Set <= 0 to disable splitting. Only affects hyperframes-rendered scenes.
+scene_max_seconds = 4.0
+hyperframes_dir = ".hyperframes"   # project dir created by setup-hyperframes.bat
+hyperframes_version = "0.6.58"     # pinned CLI version for reproducible renders
+hyperframes_node = ""         # optional dir containing node/npx; else found on PATH
+hyperframes_fps = 30
+hyperframes_timeout = 600     # seconds to wait for a single render before giving up
+# Real photo backgrounds behind motion-graphics scenes (solely + mixed). Pulled from
+# the stock photo APIs and staged into .hyperframes/assets/ (a local file, so the
+# render stays deterministic). hyperframes_image_provider defaults to video_source.
+hyperframes_images = true
+hyperframes_image_provider = ""   # "pexels" | "pixabay" | "" (follow video_source)
+hyperframes_bg_count = 2          # background photos fetched per motion-graphics scene
+# The hyperframes composition already renders the narration as kinetic typography,
+# so the burned .srt caption is suppressed by default to avoid two text layers
+# colliding. Set true only if you want the .srt subtitles burned on top as well.
+hyperframes_burn_subtitles = false
+# Preview pass (solely mode): before the full-rate render, render a fast low-fps
+# proxy, sample one frame per scene, flag near-empty/black scenes, and write a
+# contact-sheet PNG to the task dir for a quick eyeball. Off by default (the proxy
+# adds time). hyperframes_preview_fps controls the proxy frame rate.
+hyperframes_preview = false
+hyperframes_preview_fps = 3
 
 ########## Qwen3-TTS (local voice, isolated env)
 # A high-quality local neural TTS (more natural than Silero, supports Russian +
@@ -351,6 +497,30 @@ speech_region = ""
 # Get your API key at https://siliconflow.cn
 api_key = ""
 
+[telegram]
+# Product Telegram bot (start with: python -m app.bot).
+# Create a NEW bot with @BotFather and put its token here (or set
+# TELEGRAM_BOT_TOKEN in .env) -- never reuse a token that belongs to other
+# tooling. Keep the token out of version control.
+bot_token = ""
+# Deny-by-default: only these chat ids may use the bot (renders cost compute
+# and API credits). Message the bot once -- it replies with your chat id.
+allowed_chats = []                     # e.g. ["272967534"]
+# Defaults for bot-triggered renders
+language = ""                          # "ru"/"en" drives the voice switch; "" = auto
+voice_name = ""                        # "" = let the language switch pick
+video_source = "pexels"
+paragraph_number = 1
+timeout = 30                           # Bot API request timeout, seconds
+# Autopilot: scheduled news -> video -> Telegram with no manual step.
+# Renders the freshest unseen news item every N hours, once per language,
+# and delivers the mp4s to autopilot_chat_id. Off by default (renders cost
+# compute/credits).
+autopilot_enabled = false
+autopilot_chat_id = ""                 # chat that receives the scheduled videos
+autopilot_interval_hours = 6
+autopilot_languages = ["ru", "en"]     # one render per language per news item
+
 [ui]
 # UI related settings
 # 是否隐藏日志信息
@@ -365,11 +535,15 @@ hide_log = false
 # custom_position = 70.0
 
 # 字幕样式 (Caption style):
-#   "outline" -> 干净的描边文字，无背景框（默认，类似短视频字幕）
-#                clean outlined text, no box (default; modern shorts look)
+#   "karaoke" -> CapCut/TikTok 逐词高亮字幕（默认）
+#                word-by-word highlight, current word colored + scaled (default)
+#   "tiktok"  -> 全大写 + 粗描边 + 投影 (ALL-CAPS, heavy outline + drop shadow)
+#   "outline" -> 干净的描边文字，无背景框 (clean outlined text, no box)
 #   "shadow"  -> 描边 + 投影 (outline + soft drop shadow)
 #   "box"     -> 传统纯色背景框 (legacy solid background box)
-# subtitle_style = "outline"
+# subtitle_style = "karaoke"
+# 卡拉OK样式当前朗读单词的高亮颜色 (highlight color for the spoken word in karaoke)
+# subtitle_highlight_color = "#FFE600"
 
 ########## Upload-Post (Cross-post to TikTok/Instagram)
 # Upload-Post allows you to automatically cross-post generated videos to TikTok and Instagram.
@@ -390,3 +564,17 @@ upload_post_platforms = ["tiktok", "instagram"]
 
 # Automatically cross-post videos after generation (if false, you'll need to call the API manually)
 upload_post_auto_upload = false
+
+########## Audio polish (SFX + ducking)
+# Sound effects played at scene-cut points (whoosh, pop, etc.).
+# Regenerate assets: python tools/make_sfx.py
+sfx_enabled = true
+# Master volume multiplier for all SFX clips (0.0 = mute, 1.0 = full).
+sfx_volume = 0.6
+
+# BGM ducking: lower background music volume while the narrator is speaking so
+# the voice stays intelligible; the music swells back up in narration gaps.
+bgm_ducking_enabled = true
+# BGM volume while voice is active (0.0 – 1.0). bgm_volume (set elsewhere)
+# applies in silent gaps and at the end.
+bgm_duck_volume = 0.15

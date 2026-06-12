@@ -18,6 +18,85 @@ compute_type = config.whisper.get("compute_type", "int8")
 model = None
 
 
+def words_sidecar_path(subtitle_file: str) -> str:
+    """Path of the word-timing sidecar that sits next to ``subtitle_file``.
+
+    The sidecar shares the subtitle's basename with a ``.words.json`` suffix
+    (e.g. ``subtitle.srt`` -> ``subtitle.words.json``). The karaoke caption
+    style in video.py loads it to highlight the currently-spoken word.
+    """
+    base = subtitle_file
+    if base.lower().endswith(".srt"):
+        base = base[:-4]
+    return f"{base}.words.json"
+
+
+def write_words_sidecar(subtitle_file: str, words: list) -> str:
+    """Write a per-word timing sidecar next to ``subtitle_file``.
+
+    ``words`` is a list of ``{"text": str, "start": float, "end": float}``.
+    Non-fatal: any failure (bad path, serialization, empty input) is logged
+    and an empty string is returned so the caller can keep going.
+    """
+    if not subtitle_file or not words:
+        return ""
+    try:
+        cleaned = []
+        for w in words:
+            text = (w.get("text") or "").strip()
+            if not text:
+                continue
+            start = float(w.get("start", 0.0))
+            end = float(w.get("end", 0.0))
+            if end < start:
+                end = start
+            cleaned.append({"text": text, "start": start, "end": end})
+        if not cleaned:
+            return ""
+        sidecar = words_sidecar_path(subtitle_file)
+        with open(sidecar, "w", encoding="utf-8") as f:
+            json.dump(cleaned, f, ensure_ascii=False)
+        logger.info(f"word-timing sidecar created: {sidecar} ({len(cleaned)} words)")
+        return sidecar
+    except Exception as e:
+        logger.warning(f"failed to write word-timing sidecar: {str(e)}")
+        return ""
+
+
+def load_words_sidecar(subtitle_file: str) -> list:
+    """Load the word-timing sidecar for ``subtitle_file`` if present.
+
+    Returns a list of ``{"text", "start", "end"}`` dicts, or ``[]`` when the
+    sidecar is missing, empty, or malformed (non-fatal — karaoke falls back).
+    """
+    sidecar = words_sidecar_path(subtitle_file)
+    if not os.path.isfile(sidecar):
+        return []
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        words = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue
+            words.append(
+                {
+                    "text": text,
+                    "start": float(item.get("start", 0.0)),
+                    "end": float(item.get("end", 0.0)),
+                }
+            )
+        return words
+    except Exception as e:
+        logger.warning(f"failed to load word-timing sidecar {sidecar}: {str(e)}")
+        return []
+
+
 def create(audio_file, subtitle_file: str = ""):
     global model
     if WhisperModel is None:
@@ -65,6 +144,7 @@ def create(audio_file, subtitle_file: str = ""):
 
     start = timer()
     subtitles = []
+    word_timings = []
 
     def recognized(seg_text, seg_start, seg_end):
         seg_text = seg_text.strip()
@@ -89,6 +169,17 @@ def create(audio_file, subtitle_file: str = ""):
         if segment.words:
             is_segmented = False
             for word in segment.words:
+                # Collect raw per-word timings for the karaoke sidecar. The
+                # phrase SRT below still drives the legacy caption styles.
+                word_text = (word.word or "").strip()
+                if word_text:
+                    word_timings.append(
+                        {
+                            "text": word_text,
+                            "start": float(word.start),
+                            "end": float(word.end),
+                        }
+                    )
                 if not is_segmented:
                     seg_start = word.start
                     is_segmented = True
@@ -140,6 +231,9 @@ def create(audio_file, subtitle_file: str = ""):
     with open(subtitle_file, "w", encoding="utf-8") as f:
         f.write(sub)
     logger.info(f"subtitle file created: {subtitle_file}")
+
+    # Emit the word-timing sidecar for the karaoke caption style (non-fatal).
+    write_words_sidecar(subtitle_file, word_timings)
 
 
 def file_to_subtitles(filename):

@@ -71,6 +71,14 @@ class VideoGenerator(ABC):
         """Whether this provider has the credentials/endpoint it needs."""
         return True
 
+    def download_headers(self) -> dict:
+        """Extra HTTP headers for fetching the finished clip.
+
+        Most providers return pre-signed URLs (no auth); Azure protects its
+        content endpoint with the same api-key as the job API.
+        """
+        return {}
+
     @abstractmethod
     def submit(self, spec: ClipSpec) -> str:
         """Start a generation job and return an opaque job id/handle."""

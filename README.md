@@ -26,6 +26,31 @@
 
 </div>
 
+## One-click install (Windows)
+
+On Windows 11 you can set everything up with a single command and then run the
+whole thing from Telegram — no web UI, no terminal.
+
+1. Install the two prerequisites: **Python 3.11+** (https://www.python.org/downloads/windows/)
+   and **Node.js 22+** (https://nodejs.org).
+2. Double-click **`install.bat`** in the project root (or run it once from a terminal).
+   It builds the `.venv`, installs the app and the motion-graphics toolchain,
+   optionally adds local Russian TTS and the Wav2Lip avatar fallback, creates
+   `config.toml`, asks for your Telegram bot token (from
+   [@BotFather](https://t.me/BotFather)), and registers the bot to **autostart at
+   logon** via Task Scheduler. It is safe to re-run — completed steps are skipped.
+
+Once it is up, control everything from Telegram:
+
+- **`/make <topic>`** — generate a video on any topic
+- **`/news`** — turn the latest news into a video
+- **`/status`** — check what the bot is working on
+- send **photos / videos** to add your own materials to the next render
+
+The bot runs as a background worker (`run-bot.bat`, with an auto-restart loop)
+and comes back online by itself after a reboot. Logs land in
+`storage\logs\bot.log`.
+
 ## 功能特性 🎯
 
 - [x] 完整的 **MVC架构**，代码 **结构清晰**，易于维护，支持 `API` 和 `Web界面`
@@ -42,6 +67,53 @@
 - [x] 视频素材来源 **高清**，而且 **无版权**，也可以使用自己的 **本地素材**
 - [x] 支持 **OpenAI**、**Moonshot**、**Azure**、**gpt4free**、**one-api**、**通义千问**、**Google Gemini**、**Ollama**、**DeepSeek**、**MiniMax**、 **文心一言**, **Pollinations**、**ModelScope** 等多种模型接入
     - 中国用户建议使用 **DeepSeek** 或 **Moonshot** 作为大模型提供商（国内可直接访问，不需要VPN。注册就送额度，基本够用）
+
+## 病毒式视频增强 🚀
+
+### 新视频模式（`video_visual_mode`）
+
+在 `config.toml` 的 `[app]` 段（或 API 的 `video_visual_mode` 参数）设置：
+
+| 模式 | 说明 |
+|------|------|
+| `quiz` | 问答闯关：问题卡 → 3-2-1 倒计时 → 答案揭晓，全部由 LLM 生成 JSON 驱动 |
+| `ranking` | Top-N 倒数：从第 N 名揭到第 1 名，带悬念节拍 |
+| `chat` | 信使故事：两人 SMS 对话泡泡逐条弹出，同步配音 |
+| `news` | 新闻布局：持久标题板 + 下方字幕条，可选虚拟主播 |
+| `hyperframes` | 全动态图形，无素材视频 |
+
+任何 LLM/JSON 错误均非致命 — 自动降级为常规主题视频。
+
+```toml
+[app]
+video_visual_mode = "quiz"   # quiz | ranking | chat | news | hyperframes | footage
+```
+
+### 卡拉 OK 字幕
+
+逐词高亮字幕（默认启用），可在 `[ui]` 段自定义：
+
+```toml
+[ui]
+subtitle_style = "karaoke"          # karaoke | tiktok | outline | shadow | box
+subtitle_highlight_color = "#FFE600"  # 当前朗读词的高亮颜色
+```
+
+当词级时序缺失时自动降级为普通短语字幕。
+
+### 音频优化
+
+背景音乐在配音期间自动压低音量，场景切换处添加过渡音效：
+
+```toml
+[app]
+bgm_ducking_enabled = true   # 配音时自动压低 BGM
+bgm_duck_volume = 0.15       # 压低后的 BGM 音量（0.0–1.0）
+sfx_enabled = true           # 场景切换过渡音效
+sfx_volume = 0.6             # 音效音量倍数
+```
+
+重新生成音效资源：`python tools/make_sfx.py`
 
 ## 视频演示 📺
 

@@ -30,6 +30,8 @@ node_modules
 venv/
 .venv
 .venv-qwen/
+# Hyperframes project + bundled toolchain (scaffolded by setup-hyperframes.bat)
+.hyperframes/
 
 # Debug and test files
 CLAUDE.md

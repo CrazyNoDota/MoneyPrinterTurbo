@@ -23,6 +23,11 @@ class TestTaskService(unittest.TestCase):
     def tearDown(self):
         pass
     
+    @unittest.skipUnless(
+        os.environ.get("RUN_INTEGRATION"),
+        "live end-to-end run (real TTS/LLM/render + toolchain); set RUN_INTEGRATION=1. "
+        "Mocked coverage lives in TestStartOrchestration.",
+    )
     def test_task_local_materials(self):
         task_id = "00000000-0000-0000-0000-000000000000"
         video_materials=[]
@@ -251,6 +256,7 @@ class TestStartOrchestration(unittest.TestCase):
         sub_maker = mock.Mock()
         with mock.patch.object(tm, "sm") as sm, \
             mock.patch.object(tm.vision, "is_enabled", return_value=False), \
+            mock.patch.object(tm.hyperframes, "mode", return_value="footage"), \
             mock.patch.object(tm, "augment_with_pinterest"), \
             mock.patch.object(tm.llm, "generate_script", return_value="a script"), \
             mock.patch.object(tm.llm, "generate_terms", return_value=["money"]), \
@@ -269,6 +275,66 @@ class TestStartOrchestration(unittest.TestCase):
             self.assertEqual(len(result["videos"]), 1)
             # combiner saw the blended material list
             self.assertEqual(combine.call_args.kwargs["video_paths"], ["gen1.mp4", "s1.mp4"])
+
+    def test_news_mode_uses_prebuilt_video_and_caption_ranges(self):
+        task_id = str(uuid.uuid4())
+        params = self._params(subtitle_enabled=True)
+
+        sub_maker = mock.Mock()
+        with mock.patch.object(tm, "sm"), \
+            mock.patch.object(tm.vision, "is_enabled", return_value=False), \
+            mock.patch.object(tm.hyperframes, "mode", return_value="news"), \
+            mock.patch.object(
+                tm.hyperframes, "render_news_video",
+                return_value=("news.mp4", [(0.0, 5.0)]),
+            ) as rnv, \
+            mock.patch.object(tm, "augment_with_pinterest"), \
+            mock.patch.object(tm.llm, "generate_script", return_value="a script"), \
+            mock.patch.object(tm.llm, "generate_terms", return_value=["money"]), \
+            mock.patch.object(tm.voice, "tts", return_value=sub_maker), \
+            mock.patch.object(tm.voice, "get_audio_duration", return_value=5), \
+            mock.patch.object(tm.voice, "create_subtitle"), \
+            mock.patch.object(tm, "generate_subtitle", return_value="sub.srt"), \
+            mock.patch.object(tm.material, "download_videos") as dl, \
+            mock.patch.object(tm.video, "combine_videos") as combine, \
+            mock.patch.object(tm.video, "generate_video") as gen, \
+            mock.patch.object(tm.upload_post.upload_post_service, "is_configured", return_value=False):
+            result = tm.start(task_id, params)
+
+        self.assertIsNotNone(result)
+        rnv.assert_called_once()
+        # The news track is the visual: no stock download, no combining.
+        dl.assert_not_called()
+        combine.assert_not_called()
+        self.assertEqual(result["materials"], ["news.mp4"])
+        # Captions burn only over the head-less ranges reported by news mode.
+        self.assertEqual(gen.call_args.kwargs["subtitle_ranges"], [(0.0, 5.0)])
+        self.assertEqual(gen.call_args.kwargs["video_path"], "news.mp4")
+
+    def test_news_mode_failure_falls_back_to_stock(self):
+        task_id = str(uuid.uuid4())
+        params = self._params()
+
+        sub_maker = mock.Mock()
+        with mock.patch.object(tm, "sm"), \
+            mock.patch.object(tm.vision, "is_enabled", return_value=False), \
+            mock.patch.object(tm.hyperframes, "mode", return_value="news"), \
+            mock.patch.object(
+                tm.hyperframes, "render_news_video", return_value=("", [])
+            ), \
+            mock.patch.object(tm, "augment_with_pinterest"), \
+            mock.patch.object(tm.llm, "generate_script", return_value="a script"), \
+            mock.patch.object(tm.llm, "generate_terms", return_value=["money"]), \
+            mock.patch.object(tm.voice, "tts", return_value=sub_maker), \
+            mock.patch.object(tm.voice, "get_audio_duration", return_value=5), \
+            mock.patch.object(tm.material, "download_videos", return_value=["s1.mp4"]), \
+            mock.patch.object(tm.video, "combine_videos"), \
+            mock.patch.object(tm.video, "generate_video"), \
+            mock.patch.object(tm.upload_post.upload_post_service, "is_configured", return_value=False):
+            result = tm.start(task_id, params)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["materials"], ["s1.mp4"])
 
     def test_resume_reuses_cached_script_and_terms(self):
         task_id = str(uuid.uuid4())

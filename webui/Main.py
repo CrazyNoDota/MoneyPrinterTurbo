@@ -721,6 +721,36 @@ with middle_panel:
             if not (config.app.get("vision_api_key") or config.app.get("nvidia_api_key")):
                 st.warning(tr("Vision API key not set"))
 
+        # 视觉模式:实拍素材 / 纯动态图形 / 混合"导演"模式(LLM 逐场景决定实拍或动态图形)。
+        _visual_modes = ["footage", "hyperframes", "mixed"]
+        _visual_labels = {
+            "footage": tr("Footage (stock / local)"),
+            "hyperframes": tr("Motion graphics only"),
+            "mixed": tr("Mixed (director: footage + motion graphics)"),
+        }
+
+        def _initial_visual_mode():
+            m = (config.app.get("video_visual_mode", "") or "").strip().lower()
+            if m in _visual_modes:
+                return m
+            return "hyperframes" if config.app.get("hyperframes_enabled", False) else "footage"
+
+        params.video_visual_mode = st.radio(
+            tr("Visual mode"),
+            options=_visual_modes,
+            format_func=lambda m: _visual_labels[m],
+            index=_visual_modes.index(_initial_visual_mode()),
+            help=tr("Footage = stock/local clips. Motion graphics = an LLM-authored animated composition (with optional photo backgrounds). Mixed = the LLM tags each scene footage vs motion graphics and stitches them. Run setup-hyperframes.bat once for the last two."),
+        )
+        config.app["video_visual_mode"] = params.video_visual_mode
+        # Keep the legacy flag in sync so API callers / config see a consistent state.
+        params.hyperframes_enabled = params.video_visual_mode == "hyperframes"
+        config.app["hyperframes_enabled"] = params.hyperframes_enabled
+        if params.video_visual_mode in ("hyperframes", "mixed"):
+            from app.services import hyperframes
+            if not hyperframes.is_available():
+                st.warning(tr("Hyperframes not installed — run setup-hyperframes.bat"))
+
         selected_index = st.selectbox(
             tr("Video Concat Mode"),
             index=1,
@@ -1031,7 +1061,7 @@ with right_panel:
         st.write(tr("Subtitle Settings"))
         params.subtitle_enabled = st.checkbox(tr("Enable Subtitles"), value=True)
         font_names = get_all_fonts()
-        saved_font_name = config.ui.get("font_name", "MicrosoftYaHeiBold.ttc")
+        saved_font_name = config.ui.get("font_name", "Anton-Regular.ttf")
         saved_font_name_index = 0
         if saved_font_name in font_names:
             saved_font_name_index = font_names.index(saved_font_name)
@@ -1062,11 +1092,13 @@ with right_panel:
         config.ui["subtitle_position"] = params.subtitle_position
 
         subtitle_styles = [
+            (tr("Karaoke (word-by-word highlight)"), "karaoke"),
+            (tr("TikTok (punchy, all-caps)"), "tiktok"),
             (tr("Outline (clean)"), "outline"),
             (tr("Drop Shadow"), "shadow"),
             (tr("Background Box"), "box"),
         ]
-        saved_subtitle_style = config.ui.get("subtitle_style", "outline")
+        saved_subtitle_style = config.ui.get("subtitle_style", "karaoke")
         saved_style_index = 0
         for i, (_, style_value) in enumerate(subtitle_styles):
             if style_value == saved_subtitle_style:
@@ -1080,6 +1112,15 @@ with right_panel:
         )
         params.subtitle_style = subtitle_styles[selected_style_index][1]
         config.ui["subtitle_style"] = params.subtitle_style
+
+        if params.subtitle_style == "karaoke":
+            saved_highlight_color = config.ui.get(
+                "subtitle_highlight_color", "#FFE600"
+            )
+            params.subtitle_highlight_color = st.color_picker(
+                tr("Highlight Color"), saved_highlight_color
+            )
+            config.ui["subtitle_highlight_color"] = params.subtitle_highlight_color
 
         if params.subtitle_position == "custom":
             saved_custom_position = config.ui.get("custom_position", 70.0)

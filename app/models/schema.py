@@ -104,6 +104,23 @@ class VideoParams(BaseModel):
     video_gen_enabled: Optional[bool] = False
     video_gen_provider: Optional[str] = None  # null | replicate | fal | http
     video_gen_count: Optional[int] = 2
+    # Solely-hyperframes mode: build the whole video from an LLM-authored
+    # motion-graphics composition (kinetic typography, animated numbers) rendered
+    # locally, instead of stock footage. Off by default; toolchain + options live
+    # in config.toml ([app].hyperframes_*). See app/services/hyperframes.
+    hyperframes_enabled: Optional[bool] = False
+    # Visual mode selector (takes precedence over hyperframes_enabled):
+    #   "footage"     -> stock/local footage (default, unchanged)
+    #   "hyperframes" -> solely motion-graphics (with on-demand photo backgrounds)
+    #   "mixed"       -> the director: LLM tags each scene footage vs motion-graphics,
+    #                    footage stays native, MG scenes are rendered, segments stitched.
+    #   "news"        -> deterministic news layout (headline + lower-thirds + optional head)
+    #   "quiz"        -> trivia: question card -> 3-2-1 countdown beat -> answer reveal
+    #   "ranking"     -> "Top N" countdown #N..#1 with slamming rank badges
+    #   "chat"        -> messenger-style two-person story; bubbles pop in synced to TTS
+    # Default None = unset, so hyperframes.mode() falls back to hyperframes_enabled /
+    # config, then to "footage". The WebUI sets this explicitly.
+    video_visual_mode: Optional[str] = None
 
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
     video_language: Optional[str] = ""  # auto detect
@@ -117,11 +134,17 @@ class VideoParams(BaseModel):
 
     subtitle_enabled: Optional[bool] = True
     subtitle_position: Optional[str] = config.ui.get("subtitle_position", "bottom")  # top, bottom, center, custom
-    # Caption look: "outline" (clean, no box, thick outline - default),
-    # "shadow" (outline + soft drop shadow), or "box" (legacy background box).
-    subtitle_style: Optional[str] = config.ui.get("subtitle_style", "outline")
+    # Caption look: "karaoke" (CapCut/TikTok word-by-word highlight - default),
+    # "tiktok" (ALL-CAPS, heavy outline + shadow), "outline" (clean, no box,
+    # thick outline), "shadow" (outline + soft drop shadow), or "box" (legacy
+    # background box).
+    subtitle_style: Optional[str] = config.ui.get("subtitle_style", "karaoke")
+    # Highlight color for the currently-spoken word in the "karaoke" style.
+    subtitle_highlight_color: Optional[str] = config.ui.get(
+        "subtitle_highlight_color", "#FFE600"
+    )
     custom_position: float = config.ui.get("custom_position", 70.0)
-    font_name: Optional[str] = "STHeitiMedium.ttc"
+    font_name: Optional[str] = config.ui.get("font_name", "Anton-Regular.ttf")
     text_fore_color: Optional[str] = "#FFFFFF"
     text_background_color: Union[bool, str] = True
 

@@ -69,6 +69,9 @@ whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _cfg.get("azure", {})
 siliconflow = _cfg.get("siliconflow", {})
+# Product Telegram bot (app/bot). Must use its OWN bot token -- never reuse
+# tokens belonging to other tooling on this machine.
+telegram = _cfg.get("telegram", {})
 ui = _cfg.get(
     "ui",
     {
@@ -114,6 +117,16 @@ def apply_env_overrides():
             app[key] = [item.strip() for item in env_val.split(",") if item.strip()]
 
     # Other sections
+    if os.getenv("TELEGRAM_BOT_TOKEN"):
+        telegram["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
+    if os.getenv("TELEGRAM_ALLOWED_CHATS"):
+        # list[str] here vs ints/strings in TOML: the bot router compares
+        # chat ids as strings, so both shapes converge.
+        telegram["allowed_chats"] = [
+            c.strip()
+            for c in os.getenv("TELEGRAM_ALLOWED_CHATS").split(",")
+            if c.strip()
+        ]
     if os.getenv("AZURE_SPEECH_KEY"):
         azure["speech_key"] = os.getenv("AZURE_SPEECH_KEY")
     if os.getenv("AZURE_SPEECH_REGION"):

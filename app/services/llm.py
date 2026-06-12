@@ -479,6 +479,78 @@ def _generate_response(prompt: str) -> str:
         return f"Error: {str(e)}"
 
 
+# Banned opening phrases (case-insensitive prefixes). The hook-first prompts
+# below forbid these, and _strip_greeting_hook() conservatively removes a leading
+# sentence that still starts with one if the model disobeys. Keep EN + RU in sync
+# with the prompt copy so the instruction and the sanitizer agree.
+_BANNED_HOOK_PREFIXES = (
+    # English greetings / intros
+    "welcome",
+    "today we",
+    "today, we",
+    "in this video",
+    "in today's video",
+    "hello",
+    "hi there",
+    "hey there",
+    "let's dive in",
+    "let's get started",
+    "let's talk about",
+    "have you ever",
+    # Russian greetings / intros
+    "привет",
+    "здравствуйте",
+    "сегодня мы",
+    "в этом видео",
+    "в сегодняшнем видео",
+    "добро пожаловать",
+)
+
+# Splits a script into sentences while keeping the rest intact. Mirrors the
+# sentence boundary the scene builder uses (.!?。！？ + whitespace), tolerating a
+# closing quote right after the terminal punctuation.
+_GREETING_SENTENCE_SPLIT = re.compile(r"""(?<=[.!?。！？])["'»”]?\s+""")
+
+
+def _strip_greeting_hook(script: str) -> str:
+    """Conservatively drop a leading greeting sentence the LLM left in.
+
+    Only removes the very first sentence, and only when it starts with one of the
+    explicitly banned greeting/intro prefixes (EN + RU). Anything else is left
+    untouched -- a clean script must come back byte-identical apart from the
+    surrounding whitespace strip. Non-fatal: never raises, never empties a script.
+    """
+    if not script:
+        return script
+    text = script.strip()
+    # Inspect only the first sentence so a banned word later in the script
+    # (a legitimate "today we..." mid-narration) is never touched.
+    parts = _GREETING_SENTENCE_SPLIT.split(text, maxsplit=1)
+    first = parts[0].lstrip("﻿ \t\"'«“-—–").lower()
+    if not any(first.startswith(p) for p in _BANNED_HOOK_PREFIXES):
+        return script
+    if len(parts) < 2 or not parts[1].strip():
+        # Nothing but the greeting -- keep it rather than return an empty script.
+        return script
+    logger.info("hook sanitizer: stripped a leading banned greeting sentence")
+    return parts[1].strip()
+
+
+# Shared hook-first guidance injected into the narration prompts. The first
+# sentence must be a pattern-interrupt hook; sentences stay short and concrete.
+_HOOK_RULES = (
+    "The FIRST sentence MUST be a pattern-interrupt hook: 8 words or fewer, "
+    "creating curiosity or stakes. NEVER open with a greeting or channel intro. "
+    "Banned openings (English): \"Welcome\", \"Today we\", \"In this video\", "
+    "\"Hello\", \"Have you ever\", \"Let's dive in\". "
+    "Banned openings (Russian): \"Привет\", \"Здравствуйте\", \"Сегодня мы\", "
+    "\"В этом видео\", \"Добро пожаловать\". "
+    "Keep every sentence short and concrete. No filler or transition phrases "
+    "(\"as we all know\", \"let's dive in\", \"without further ado\"). "
+    "You MAY end with one short call-to-action sentence, but only if it fits naturally."
+)
+
+
 def generate_script(
     video_subject: str,
     language: str = "",
@@ -500,6 +572,9 @@ Generate a script for a video, depending on the subject of the video.
 6. do not include "voiceover", "narrator" or similar indicators of what should be spoken at the beginning of each paragraph or line.
 7. you must not mention the prompt, or anything about the script itself. also, never talk about the amount of paragraphs or lines. just write the script.
 8. respond in the same language as the video subject.
+
+## Hook & Pacing (retention):
+{_HOOK_RULES}
 
 # Initialization:
 - video subject: {video_subject}
@@ -539,7 +614,9 @@ Generate a script for a video, depending on the subject of the video.
         # selected_paragraphs = paragraphs[:paragraph_number]
 
         # Join the selected paragraphs into a single string
-        return "\n\n".join(paragraphs)
+        joined = "\n\n".join(paragraphs)
+        # Conservatively drop a leading greeting if the model ignored the hook rule.
+        return _strip_greeting_hook(joined)
 
     for i in range(_max_retries):
         try:
@@ -566,6 +643,319 @@ Generate a script for a video, depending on the subject of the video.
     else:
         logger.success(f"completed: \n{final_script}")
     return final_script.strip()
+
+
+def generate_news_script(
+    news_item,
+    language: str = "",
+    paragraph_number: int = 1,
+) -> str:
+    """Turn one news item into a narration script for a short news video.
+
+    ``news_item`` is any object with title/text/url/source/published attributes
+    (duck-typed to avoid importing app.services.news here). Returns "" when the
+    item has no usable content or the LLM keeps failing -- callers fall back to
+    the regular subject-driven script path.
+    """
+    # title/text are untrusted web content (scraped posts/feeds) interpolated
+    # into the prompt; the constraints below pin the model to fact extraction,
+    # but treat the output as a script draft, not as instructions followed.
+    title = (getattr(news_item, "title", "") or "").strip()
+    text = (getattr(news_item, "text", "") or "").strip()
+    if not title and not text:
+        logger.warning("news item has no title/text; cannot build a script")
+        return ""
+
+    prompt = f"""
+# Role: News Video Script Writer
+
+## Goals:
+Write the narration script for a short vertical news video based on the news item below.
+
+## Constrains:
+1. open with a pattern-interrupt hook: the first sentence is 8 words or fewer, stating the most striking fact, then the key facts. NEVER open with a greeting or channel intro. Banned openings (English): "Welcome", "Today we", "In this video", "Hello". Banned openings (Russian): "Привет", "Здравствуйте", "Сегодня мы", "В этом видео", "Добро пожаловать".
+2. neutral news-anchor tone: factual, concise, present tense; do not editorialize or speculate beyond the provided item.
+3. only use facts contained in the news item; if a detail is missing, leave it out rather than inventing it.
+4. the script is to be returned as a string with the specified number of paragraphs.
+5. you must not include any type of markdown or formatting in the script, never use a title.
+6. do not include "voiceover", "narrator" or similar indicators of what should be spoken.
+7. only return the raw content of the script; never mention this prompt.
+8. keep sentences short and concrete; no filler or transition phrases ("as we all know", "let's dive in").
+
+## News Item:
+- title: {title}
+- content: {text}
+""".strip()
+    published = (getattr(news_item, "published", "") or "").strip()
+    if published:
+        prompt += f"\n- published: {published}"
+    prompt += f"\n\n# Initialization:\n- number of paragraphs: {paragraph_number}"
+    if language:
+        prompt += f"\n- language: {language} (write the script in this language regardless of the item's language)"
+
+    final_script = ""
+    logger.info(f"news script for: {title or text[:80]}")
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt=prompt)
+            if response and "Error: " not in response:
+                final_script = response.replace("*", "").replace("#", "").strip()
+                final_script = _strip_greeting_hook(final_script)
+            if final_script:
+                break
+        except Exception as e:
+            logger.error(f"failed to generate news script: {e}")
+        if i < _max_retries - 1:
+            logger.warning(f"failed to generate news script, trying again... {i + 1}")
+            _backoff_sleep(i)
+    if final_script:
+        logger.success(f"completed: \n{final_script}")
+    else:
+        logger.error("failed to generate news script")
+    return final_script
+
+
+def _extract_json(response: str):
+    """Best-effort JSON extraction from a model response.
+
+    Models sometimes wrap JSON in ```json fences or prose. Try a direct parse,
+    then the first balanced ``{...}`` / ``[...]`` blob. Raises on total failure.
+    """
+    if not response or not isinstance(response, str):
+        raise ValueError("empty response")
+    text = response.strip()
+    # Strip a leading ```json / ``` fence if present.
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        return json.loads(match.group())
+    raise ValueError("no JSON object found in response")
+
+
+def generate_quiz(
+    video_subject: str,
+    language: str = "",
+    count: int = 4,
+) -> dict:
+    """Generate trivia quiz questions as strict JSON for the quiz video format.
+
+    Returns ``{"questions": [{"q", "a", "fun_fact"}, ...]}`` or ``None`` on
+    repeated failure -- callers fall back to the regular subject-driven script.
+    """
+    count = max(2, min(int(count or 4), 6))
+    lang_line = f"\n- write all text in this language: {language}" if language else ""
+    prompt = f"""
+# Role: Trivia Quiz Writer for a short vertical video
+
+## Goals:
+Write {count} punchy trivia questions about the subject below, each with its
+answer and one surprising one-line fun fact.
+
+## Constraints:
+1. return ONLY a JSON object, no markdown, no prose, no code fences.
+2. exact shape: {{"questions": [{{"q": "...", "a": "...", "fun_fact": "..."}}]}}
+3. each "q" is a single short question (<= 14 words); each "a" is a short answer
+   (<= 8 words); each "fun_fact" is one surprising sentence (<= 18 words).
+4. questions must be factually correct and genuinely interesting, not trivial.
+5. no numbering inside the strings; no trailing punctuation tricks.{lang_line}
+
+## Subject:
+{video_subject}
+""".strip()
+
+    logger.info(f"generating quiz for: {video_subject}")
+    for i in range(_max_retries):
+        response = ""
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                logger.error(f"failed to generate quiz: {response}")
+                return None
+            data = _extract_json(response)
+            questions = data.get("questions") if isinstance(data, dict) else None
+            cleaned = []
+            for item in questions or []:
+                q = (item.get("q") or "").strip()
+                a = (item.get("a") or "").strip()
+                if not q or not a:
+                    continue
+                cleaned.append({
+                    "q": q, "a": a,
+                    "fun_fact": (item.get("fun_fact") or "").strip(),
+                })
+            if cleaned:
+                logger.success(f"quiz: {len(cleaned)} question(s)")
+                return {"questions": cleaned}
+            logger.warning("quiz JSON had no usable questions")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"failed to parse quiz JSON: {e}")
+        if i < _max_retries - 1:
+            _backoff_sleep(i)
+    logger.error("failed to generate quiz; caller should fall back")
+    return None
+
+
+def generate_ranking(
+    video_subject: str,
+    language: str = "",
+    count: int = 5,
+) -> dict:
+    """Generate a "Top N" ranking as strict JSON for the ranking video format.
+
+    Returns ``{"title": "...", "items": [{"rank", "name", "reason"}, ...]}`` with
+    items ordered N..1, or ``None`` on repeated failure.
+    """
+    count = max(3, min(int(count or 5), 7))
+    lang_line = f"\n- write all text in this language: {language}" if language else ""
+    prompt = f"""
+# Role: Top-N List Writer for a short vertical video
+
+## Goals:
+Write a "Top {count}" ranking about the subject below, counting DOWN from #{count}
+to #1, each item with a one-line reason it earns its spot.
+
+## Constraints:
+1. return ONLY a JSON object, no markdown, no prose, no code fences.
+2. exact shape: {{"title": "Top {count} ...", "items": [{{"rank": {count}, "name": "...", "reason": "..."}}]}}
+3. "items" MUST be ordered from rank {count} down to rank 1 (suspense before #1).
+4. each "name" is short (<= 8 words); each "reason" is one line (<= 16 words).
+5. ranks are the integers {count}..1 with no gaps or repeats.
+6. the ranking must be sensible and engaging.{lang_line}
+
+## Subject:
+{video_subject}
+""".strip()
+
+    logger.info(f"generating ranking for: {video_subject}")
+    for i in range(_max_retries):
+        response = ""
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                logger.error(f"failed to generate ranking: {response}")
+                return None
+            data = _extract_json(response)
+            if not isinstance(data, dict):
+                raise ValueError("ranking JSON is not an object")
+            items = data.get("items") or []
+            cleaned = []
+            for item in items:
+                name = (item.get("name") or "").strip()
+                if not name:
+                    continue
+                try:
+                    rank = int(item.get("rank"))
+                except (TypeError, ValueError):
+                    continue
+                cleaned.append({
+                    "rank": rank, "name": name,
+                    "reason": (item.get("reason") or "").strip(),
+                })
+            # Enforce a strict N..1 descending order (drop dup ranks, keep order).
+            cleaned.sort(key=lambda it: it["rank"], reverse=True)
+            seen = set()
+            ordered = []
+            for it in cleaned:
+                if it["rank"] in seen:
+                    continue
+                seen.add(it["rank"])
+                ordered.append(it)
+            if ordered:
+                title = (data.get("title") or f"Top {len(ordered)} {video_subject}").strip()
+                logger.success(f"ranking: {len(ordered)} item(s)")
+                return {"title": title, "items": ordered}
+            logger.warning("ranking JSON had no usable items")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"failed to parse ranking JSON: {e}")
+        if i < _max_retries - 1:
+            _backoff_sleep(i)
+    logger.error("failed to generate ranking; caller should fall back")
+    return None
+
+
+def generate_chat_story(
+    video_subject: str,
+    language: str = "",
+    count: int = 14,
+) -> dict:
+    """Generate a two-person messenger story as strict JSON for the chat format.
+
+    A short SMS/messenger dialogue between two people: a scroll-stopping first
+    message (the hook), rising tension, and a twist at the end -- the single most
+    viral short-form text format.
+
+    Returns ``{"title": "...", "persons": ["A", "B"], "messages": [{"from": 0|1,
+    "text": "..."}, ...]}`` (messages ordered, 10-18 short lines) or ``None`` on
+    repeated failure -- callers fall back to the regular subject-driven script.
+    """
+    count = max(10, min(int(count or 14), 18))
+    lang_line = f"\n- write all message text in this language: {language}" if language else ""
+    prompt = f"""
+# Role: Viral Messenger-Story Writer for a short vertical video
+
+## Goals:
+Write a gripping two-person text-message (messenger) conversation about the
+subject below. Message 1 MUST be a scroll-stopping hook. The exchange escalates
+with rising tension and ends on a surprising twist in the final message.
+
+## Constraints:
+1. return ONLY a JSON object, no markdown, no prose, no code fences.
+2. exact shape: {{"title": "...", "persons": ["FirstName", "OtherName"], "messages": [{{"from": 0, "text": "..."}}]}}
+3. "persons" is exactly two short first names (the two people texting).
+4. "messages" has between 10 and {count} entries, ordered as the chat unfolds.
+5. each "from" is 0 (persons[0]) or 1 (persons[1]); the two MUST alternate often
+   (a real back-and-forth), never all from one side.
+6. each "text" is a single short chat line (<= 14 words), like a real text -- no
+   narration, no quotation marks, no speaker labels inside the text.
+7. message 1 is the hook; the final message is the twist/payoff.
+8. keep it coherent, surprising, and emotionally engaging.{lang_line}
+
+## Subject:
+{video_subject}
+""".strip()
+
+    logger.info(f"generating chat story for: {video_subject}")
+    for i in range(_max_retries):
+        response = ""
+        try:
+            response = _generate_response(prompt)
+            if "Error: " in response:
+                logger.error(f"failed to generate chat story: {response}")
+                return None
+            data = _extract_json(response)
+            if not isinstance(data, dict):
+                raise ValueError("chat story JSON is not an object")
+            persons = data.get("persons") or []
+            persons = [str(p).strip() for p in persons if str(p).strip()][:2]
+            if len(persons) < 2:
+                persons = (persons + ["A", "B"])[:2]
+            messages = []
+            for item in data.get("messages") or []:
+                text = (item.get("text") or "").strip()
+                if not text:
+                    continue
+                try:
+                    sender = int(item.get("from"))
+                except (TypeError, ValueError):
+                    sender = 0
+                messages.append({"from": 1 if sender else 0, "text": text})
+            if len(messages) >= 2:
+                title = (data.get("title") or video_subject).strip()
+                logger.success(f"chat story: {len(messages)} message(s)")
+                return {"title": title, "persons": persons, "messages": messages}
+            logger.warning("chat story JSON had no usable messages")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"failed to parse chat story JSON: {e}")
+        if i < _max_retries - 1:
+            _backoff_sleep(i)
+    logger.error("failed to generate chat story; caller should fall back")
+    return None
 
 
 def generate_terms(

@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.utils import utils
+from app.models.schema import VideoParams
 from app.services import voice as vs
 from app.services import task as task_service
 from pydub import AudioSegment
@@ -465,6 +466,189 @@ class TestVoiceService(unittest.TestCase):
 
         self.assertEqual(len(sub_items), len(script_lines))
         self.assertIn("1,000 years", sub_items[-1])
+
+class TestLanguageSwitch(unittest.TestCase):
+    """RU/EN language switch: voice_candidates builds the TTS fallback chain."""
+
+    def _with_azure(self, key="k", region="r"):
+        return patch.dict(vs.config.azure, {"speech_key": key, "speech_region": region})
+
+    def _without_azure(self):
+        return patch.dict(vs.config.azure, {"speech_key": "", "speech_region": ""})
+
+    def test_normalize_language(self):
+        self.assertEqual(vs.normalize_language("ru"), "ru")
+        self.assertEqual(vs.normalize_language("ru-RU"), "ru")
+        self.assertEqual(vs.normalize_language("EN-us"), "en")
+        self.assertEqual(vs.normalize_language("zh-CN"), "")
+        self.assertEqual(vs.normalize_language(""), "")
+        self.assertEqual(vs.normalize_language(None), "")
+
+    def test_voice_language_detection(self):
+        self.assertEqual(vs._voice_language("ru-RU-DmitryNeural-V2-Male"), "ru")
+        self.assertEqual(vs._voice_language("en-US-AndrewNeural"), "en")
+        self.assertEqual(vs._voice_language("qwen:Russian:ryan-Male"), "ru")
+        self.assertEqual(vs._voice_language("qwen:English:aiden-Male"), "en")
+        self.assertEqual(vs._voice_language("silero:v5_ru:baya-Female"), "ru")
+        self.assertEqual(vs._voice_language("gemini:Zephyr-Female"), "")
+        self.assertEqual(vs._voice_language("zh-CN-XiaoxiaoNeural-Female"), "zh")
+        self.assertEqual(vs._voice_language(""), "")
+
+    def test_azure_speech_configured(self):
+        with self._with_azure():
+            self.assertTrue(vs.azure_speech_configured())
+        with self._without_azure():
+            self.assertFalse(vs.azure_speech_configured())
+        with patch.dict(vs.config.azure, {"speech_key": "k", "speech_region": ""}):
+            self.assertFalse(vs.azure_speech_configured())
+
+    def test_no_language_keeps_legacy_single_voice(self):
+        chain = vs.voice_candidates(language="", voice_name="zh-CN-XiaoxiaoNeural-Female")
+        self.assertEqual(chain, ["zh-CN-XiaoxiaoNeural"])
+        # zh is not a switch language either
+        chain = vs.voice_candidates(language="zh-CN", voice_name="zh-CN-XiaoxiaoNeural-Female")
+        self.assertEqual(chain, ["zh-CN-XiaoxiaoNeural"])
+
+    def test_ru_without_azure_key_skips_primary(self):
+        with self._without_azure():
+            chain = vs.voice_candidates(language="ru-RU")
+        self.assertEqual(chain, ["qwen:Russian:ryan"])
+
+    def test_ru_with_azure_key_leads_with_azure_v2(self):
+        with self._with_azure():
+            chain = vs.voice_candidates(language="ru")
+        self.assertEqual(chain, ["ru-RU-DmitryNeural-V2", "qwen:Russian:ryan"])
+        self.assertTrue(vs.is_azure_v2_voice(chain[0]))
+
+    def test_en_fallback_is_keyless_edge_voice(self):
+        with self._without_azure():
+            chain = vs.voice_candidates(language="en-US")
+        self.assertEqual(chain, ["en-US-AndrewNeural"])
+        self.assertFalse(vs.is_azure_v2_voice(chain[0]))
+
+    def test_matching_explicit_voice_leads(self):
+        with self._with_azure():
+            chain = vs.voice_candidates(
+                language="en", voice_name="en-US-JennyNeural-Female"
+            )
+        self.assertEqual(
+            chain,
+            ["en-US-JennyNeural", "en-US-AndrewMultilingualNeural-V2", "en-US-AndrewNeural"],
+        )
+
+    def test_mismatched_explicit_voice_is_demoted_not_dropped(self):
+        with self._without_azure():
+            chain = vs.voice_candidates(
+                language="ru", voice_name="zh-CN-XiaoxiaoNeural-Female"
+            )
+        self.assertEqual(chain, ["qwen:Russian:ryan", "zh-CN-XiaoxiaoNeural"])
+
+    def test_explicit_voice_equal_to_fallback_dedupes(self):
+        with self._without_azure():
+            chain = vs.voice_candidates(language="ru", voice_name="qwen:Russian:ryan-Male")
+        self.assertEqual(chain, ["qwen:Russian:ryan"])
+
+    def test_explicit_azure_v2_voice_demoted_without_key(self):
+        with self._without_azure():
+            chain = vs.voice_candidates(
+                language="ru", voice_name="ru-RU-SvetlanaNeural-V2-Female"
+            )
+        # The key-less fallback must go first; the doomed azure-v2 attempt last.
+        self.assertEqual(chain, ["qwen:Russian:ryan", "ru-RU-SvetlanaNeural-V2"])
+        # With a key it leads as a normal matching explicit voice.
+        with self._with_azure():
+            chain = vs.voice_candidates(
+                language="ru", voice_name="ru-RU-SvetlanaNeural-V2-Female"
+            )
+        self.assertEqual(chain[0], "ru-RU-SvetlanaNeural-V2")
+        # Legacy single-voice mode (no language) is untouched.
+        with self._without_azure():
+            chain = vs.voice_candidates(
+                language="", voice_name="ru-RU-SvetlanaNeural-V2-Female"
+            )
+        self.assertEqual(chain, ["ru-RU-SvetlanaNeural-V2"])
+
+    def test_azure_voice_basename(self):
+        self.assertEqual(
+            vs.azure_voice_basename("ru-RU-DmitryNeural-V2-Male"), "ru-RU-DmitryNeural"
+        )
+        self.assertEqual(
+            vs.azure_voice_basename("en-US-AndrewNeural-Male"), "en-US-AndrewNeural"
+        )
+        self.assertEqual(vs.azure_voice_basename("qwen:Russian:ryan-Male"), "")
+        self.assertEqual(vs.azure_voice_basename("silero:v5_ru:baya-Female"), "")
+        self.assertEqual(vs.azure_voice_basename(""), "")
+
+    def test_config_overrides_chain(self):
+        with self._without_azure(), patch.dict(
+            vs.config.app,
+            {"voice_ru_primary": "silero:v5_ru:baya-Female", "voice_ru_fallback": ""},
+        ):
+            chain = vs.voice_candidates(language="ru")
+        # A non-azure primary needs no key; an empty fallback is skipped.
+        self.assertEqual(chain, ["silero:v5_ru:baya"])
+
+
+class TestGenerateAudioFallback(unittest.TestCase):
+    """task.generate_audio walks the voice chain until one synthesizes."""
+
+    def _params(self, **overrides):
+        defaults = dict(
+            video_subject="test",
+            video_script="Test script.",
+            video_language="ru-RU",
+            voice_name="",
+            voice_rate=1.0,
+            subtitle_enabled=False,
+        )
+        defaults.update(overrides)
+        return VideoParams(**defaults)
+
+    def _run(self, tts_results, candidates):
+        params = self._params()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(
+                task_service.utils, "task_dir", return_value=tmp
+            ), patch.object(
+                task_service.voice, "voice_candidates", return_value=candidates
+            ), patch.object(
+                task_service.voice, "tts", side_effect=tts_results
+            ) as tts_mock, patch.object(
+                task_service.voice, "get_audio_duration", return_value=12.0
+            ), patch.object(
+                task_service.sm.state, "update_task"
+            ):
+                result = task_service.generate_audio("tid", params, "Test script.")
+        return result, tts_mock
+
+    def test_first_voice_success_stops_chain(self):
+        (audio, duration, sub_maker), tts_mock = self._run(
+            tts_results=[SimpleNamespace()], candidates=["ru-RU-DmitryNeural-V2", "qwen:Russian:ryan"]
+        )
+        self.assertTrue(audio.endswith("audio.mp3"))
+        self.assertEqual(duration, 12)
+        self.assertEqual(tts_mock.call_count, 1)
+        self.assertEqual(tts_mock.call_args.kwargs["voice_name"], "ru-RU-DmitryNeural-V2")
+
+    def test_primary_failure_falls_back_to_next_voice(self):
+        (audio, duration, _), tts_mock = self._run(
+            tts_results=[None, SimpleNamespace()],
+            candidates=["ru-RU-DmitryNeural-V2", "qwen:Russian:ryan"],
+        )
+        self.assertTrue(audio.endswith("audio.mp3"))
+        self.assertEqual(tts_mock.call_count, 2)
+        self.assertEqual(tts_mock.call_args.kwargs["voice_name"], "qwen:Russian:ryan")
+
+    def test_all_voices_fail_returns_error_triple(self):
+        (audio, duration, sub_maker), tts_mock = self._run(
+            tts_results=[None, None],
+            candidates=["ru-RU-DmitryNeural-V2", "qwen:Russian:ryan"],
+        )
+        self.assertIsNone(audio)
+        self.assertIsNone(duration)
+        self.assertIsNone(sub_maker)
+        self.assertEqual(tts_mock.call_count, 2)
+
 
 if __name__ == "__main__":
     # python -m unittest test.services.test_voice.TestVoiceService.test_azure_tts_v1

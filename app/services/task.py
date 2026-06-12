@@ -10,6 +10,7 @@ from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
 from app.services import (
+    hyperframes,
     llm,
     material,
     pinterest,
@@ -233,6 +234,47 @@ def generate_script(task_id, params, material_hints=None):
     return video_script
 
 
+def generate_quiz_or_ranking(task_id, params, hf_mode):
+    """Generate the structured quiz/ranking/chat data + its narration, or fall back.
+
+    Handles the structured-script formats (``quiz``, ``ranking``, ``chat``): each
+    asks the LLM for strict JSON and builds its own continuous narration from it.
+
+    Returns ``(video_script, structured_dict)``. On any LLM/JSON failure both are
+    derived as best-effort: ``structured_dict`` is ``None`` and the caller keeps
+    the regular subject-driven script path (non-fatal degradation -- task.py then
+    renders a normal video instead of the structured format).
+    """
+    subject = (params.video_subject or "").strip()
+    language = params.video_language or ""
+    structured = None
+    script = ""
+    try:
+        if hf_mode == "quiz":
+            structured = llm.generate_quiz(video_subject=subject, language=language)
+            if structured:
+                script = hyperframes.quiz_narration(structured)
+        elif hf_mode == "ranking":
+            structured = llm.generate_ranking(video_subject=subject, language=language)
+            if structured:
+                script = hyperframes.ranking_narration(structured)
+        elif hf_mode == "chat":
+            structured = llm.generate_chat_story(video_subject=subject, language=language)
+            if structured:
+                script = hyperframes.chat_narration(structured)
+    except Exception as e:  # noqa: BLE001 - never crash the pipeline over a format
+        logger.warning(f"{hf_mode} generation failed, falling back to normal script: {e}")
+        structured = None
+        script = ""
+
+    if not structured or not script.strip():
+        logger.warning(
+            f"{hf_mode} content unavailable; falling back to the regular script path"
+        )
+        return None, None
+    return script, structured
+
+
 def generate_terms(task_id, params, video_script, material_hints=None):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
@@ -311,12 +353,29 @@ def generate_audio(task_id, params, video_script):
                 logger.info("resuming: reusing existing audio.mp3 (skipping TTS)")
                 return audio_file, reused_duration, None
             logger.warning("existing audio.mp3 had zero duration; regenerating")
-        sub_maker = voice.tts(
-            text=video_script,
-            voice_name=voice.parse_voice_name(params.voice_name),
-            voice_rate=params.voice_rate,
-            voice_file=audio_file,
+        # RU/EN language switch: an ordered voice chain (Azure Neural primary,
+        # local/free fallback). Without a recognized language this is exactly
+        # the single configured voice, i.e. legacy behavior.
+        candidates = voice.voice_candidates(
+            language=params.video_language, voice_name=params.voice_name
         )
+        sub_maker = None
+        for index, candidate in enumerate(candidates):
+            if index > 0:
+                logger.warning(f"TTS failed; falling back to voice: {candidate}")
+            sub_maker = voice.tts(
+                text=video_script,
+                voice_name=candidate,
+                voice_rate=params.voice_rate,
+                voice_file=audio_file,
+            )
+            if sub_maker is not None:
+                # Record the voice actually used so downstream consumers (the
+                # news-mode avatar) can match it -- lips track the narration.
+                # Note: script.json (saved earlier) keeps the *requested* voice,
+                # and the resume path above returns before this line.
+                params.voice_name = candidate
+                break
         if sub_maker is None:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             logger.error(
@@ -534,10 +593,36 @@ def _gather_base_materials(task_id, params, video_terms, audio_duration):
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path
+    task_id, params, downloaded_videos, audio_file, subtitle_path, prebuilt_video=None,
+    subtitle_ranges=None,
 ):
     final_video_paths = []
     combined_video_paths = []
+
+    # When hyperframes produced the visual track, the narration is already on
+    # screen as kinetic typography. Burning the .srt captions on top of those
+    # scenes would stack a second text layer over the first (the "0%" counter
+    # colliding with the big caption). So:
+    #   - solely mode (subtitle_ranges is None): every scene bakes its own text =>
+    #     skip burned captions entirely.
+    #   - mixed mode (subtitle_ranges is a list): footage scenes have no text =>
+    #     burn captions ONLY over those (start, end) ranges; motion-graphics scenes
+    #     stay clean.
+    # `hyperframes_burn_subtitles` forces the old behaviour (burn everything).
+    burn_subtitle_path = subtitle_path
+    burn_ranges = None
+    if prebuilt_video and not config.app.get("hyperframes_burn_subtitles", False):
+        if subtitle_ranges is None:
+            logger.info(
+                "hyperframes track already renders captions; skipping burned .srt overlay"
+            )
+            burn_subtitle_path = ""
+        else:
+            logger.info(
+                f"hyperframes mixed: burning captions only over {len(subtitle_ranges)} "
+                "footage scene(s); motion-graphics scenes keep their baked text"
+            )
+            burn_ranges = subtitle_ranges
     video_concat_mode = (
         params.video_concat_mode if params.video_count == 1 else VideoConcatMode.random
     )
@@ -546,20 +631,26 @@ def generate_final_videos(
     _progress = 50
     for i in range(params.video_count):
         index = i + 1
-        combined_video_path = path.join(
-            utils.task_dir(task_id), f"combined-{index}.mp4"
-        )
-        logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-        )
+        if prebuilt_video:
+            # Hyperframes already produced a full-length, aspect-correct visual
+            # track; use it directly instead of concatenating/cropping clips.
+            combined_video_path = prebuilt_video
+            logger.info(f"\n\n## using hyperframes video: {index} => {combined_video_path}")
+        else:
+            combined_video_path = path.join(
+                utils.task_dir(task_id), f"combined-{index}.mp4"
+            )
+            logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
@@ -570,9 +661,10 @@ def generate_final_videos(
         video.generate_video(
             video_path=combined_video_path,
             audio_path=audio_file,
-            subtitle_path=subtitle_path,
+            subtitle_path=burn_subtitle_path,
             output_file=final_video_path,
             params=params,
+            subtitle_ranges=burn_ranges,
         )
 
         _progress += 50 / params.video_count / 2
@@ -609,11 +701,27 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     # needed for video assembly even when the script is reused.
     augment_with_pinterest(params)
 
+    # Resolve the visual mode up front: the quiz/ranking formats need a special
+    # narration script (built from structured LLM JSON) generated BEFORE TTS, so
+    # the audio carries the question/countdown/answer (or Top-N) beats.
+    hf_mode = hyperframes.mode(params)
+    # Structured quiz/ranking data (dict) when those formats produced content;
+    # None otherwise (including after a non-fatal fallback to the normal path).
+    hf_content = None
+
     # 1. Generate script (or reuse the cached one).
     if cached_script:
         logger.info("resuming: reusing cached script + terms from a previous run")
         video_script = cached_script
         material_hints = None
+    elif hf_mode in ("quiz", "ranking", "chat"):
+        material_hints = None
+        video_script, hf_content = generate_quiz_or_ranking(task_id, params, hf_mode)
+        if not video_script:
+            # Fall back to the regular subject-driven script; downstream render
+            # then treats this as a normal hyperframes/footage video.
+            hf_mode = "footage"
+            video_script = generate_script(task_id, params)
     else:
         # Understand the local materials once (vision descriptions or file names)
         # and reuse the hints for both the script and the stock search terms.
@@ -705,10 +813,81 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
-    # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id, params, video_terms, audio_duration
-    )
+    # 5. Get video materials. In solely-hyperframes mode, render a motion-graphics
+    # track timed to the narration instead of gathering stock/local footage; if it
+    # produces nothing (toolchain missing / authoring failed), fall back to stock.
+    hf_video = ""
+    # None => solely mode (suppress all burned captions); a list => mixed/news
+    # mode (caption only the (start, end) ranges in the list).
+    hf_footage_ranges = None
+    # hf_mode was resolved up front (quiz/ranking may have downgraded to
+    # "footage" after a non-fatal content fallback).
+    if hf_mode == "quiz" and hf_content:
+        hf_video, hf_footage_ranges = hyperframes.render_quiz_video(
+            task_id, params, hf_content, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes quiz produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "ranking" and hf_content:
+        hf_video, hf_footage_ranges = hyperframes.render_ranking_video(
+            task_id, params, hf_content, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes ranking produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "chat" and hf_content:
+        hf_video, hf_footage_ranges = hyperframes.render_chat_video(
+            task_id, params, hf_content, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes chat produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "mixed":
+        # Director: LLM tags each scene footage vs motion-graphics; footage stays
+        # native, MG scenes are rendered, and the segments are stitched in order.
+        hf_video, hf_footage_ranges = hyperframes.render_directed_video(
+            task_id, params, video_script, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms, material_hints=material_hints,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes director produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "news":
+        # News: deterministic headline + lower-third composition with an optional
+        # talking-head presenter in the corner. Captions burn only when no head
+        # was produced (the ranges then span the whole video).
+        hf_video, hf_footage_ranges = hyperframes.render_news_video(
+            task_id, params, video_script, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes news produced no video; falling back to stock/local footage"
+            )
+    elif hf_mode == "hyperframes":
+        hf_video = hyperframes.render_video(
+            task_id, params, video_script, audio_file, subtitle_path, audio_duration,
+            video_terms=video_terms,
+        )
+        if not hf_video:
+            logger.warning(
+                "hyperframes mode produced no video; falling back to stock/local footage"
+            )
+
+    if hf_video:
+        downloaded_videos = [hf_video]
+    else:
+        downloaded_videos = get_video_materials(
+            task_id, params, video_terms, audio_duration
+        )
     if not downloaded_videos:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -731,7 +910,9 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 6. Generate final videos
     final_video_paths, combined_video_paths = generate_final_videos(
-        task_id, params, downloaded_videos, audio_file, subtitle_path
+        task_id, params, downloaded_videos, audio_file, subtitle_path,
+        prebuilt_video=hf_video or None,
+        subtitle_ranges=hf_footage_ranges if hf_video else None,
     )
 
     if not final_video_paths:

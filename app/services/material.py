@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import requests
 from loguru import logger
 from moviepy.video.io.VideoFileClip import VideoFileClip
+from PIL import Image
 
 from app.config import config
 from app.models import const
@@ -219,6 +220,245 @@ def search_videos_pixabay(
         logger.error(f"search videos failed: {str(e)}")
 
     return []
+
+
+# --- Photo search -----------------------------------------------------------
+# Hyperframes can show real photos as backgrounds behind motion graphics. These
+# mirror the video search above (same key rotation / retry / TLS / proxy), but
+# hit the photo endpoints and return MaterialInfo whose ``url`` is a remote
+# image URL to be downloaded with ``save_image``.
+
+# Pixabay's image API only accepts all/horizontal/vertical; map the aspect name.
+_PIXABAY_ORIENTATION = {"portrait": "vertical", "landscape": "horizontal", "square": "all"}
+
+
+def search_images_pexels(
+    search_term: str,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    per_page: int = 20,
+) -> List[MaterialInfo]:
+    aspect = VideoAspect(video_aspect)
+    api_key = get_api_key("pexels_api_keys")
+    headers = {
+        "Authorization": api_key,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    }
+    params = {"query": search_term, "per_page": per_page, "orientation": aspect.name}
+    query_url = f"https://api.pexels.com/v1/search?{urlencode(params)}"
+    logger.info(f"searching images: {query_url}, with proxies: {config.proxy}")
+
+    try:
+        def _search():
+            resp = requests.get(
+                query_url,
+                headers=headers,
+                proxies=config.proxy,
+                verify=_get_tls_verify(),
+                timeout=(30, 60),
+            )
+            resp.raise_for_status()
+            return resp
+
+        r = call_with_retry(_search, description="pexels.search_images")
+        response = r.json()
+        items = []
+        for p in response.get("photos", []):
+            src = p.get("src", {}) or {}
+            # Prefer the full-resolution original: the resized renditions
+            # (large2x = h*2 <= ~1300px tall for portrait shots) never clear a
+            # full-bleed 1080x1920 minimum, which silently starved portrait
+            # videos of every background photo.
+            url = src.get("original") or src.get("large2x") or src.get("large")
+            if not url:
+                continue
+            item = MaterialInfo()
+            item.provider = "pexels"
+            item.url = url
+            item.name = (p.get("alt") or search_term).strip()
+            items.append(item)
+        return items
+    except Exception as e:
+        logger.error(f"search images failed: {str(e)}")
+    return []
+
+
+def search_images_pixabay(
+    search_term: str,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    per_page: int = 20,
+) -> List[MaterialInfo]:
+    aspect = VideoAspect(video_aspect)
+    api_key = get_api_key("pixabay_api_keys")
+    params = {
+        "q": search_term,
+        "image_type": "photo",
+        "orientation": _PIXABAY_ORIENTATION.get(aspect.name, "all"),
+        "per_page": per_page,
+        "key": api_key,
+    }
+    query_url = f"https://pixabay.com/api/?{urlencode(params)}"
+    logger.info(f"searching images: {query_url}, with proxies: {config.proxy}")
+
+    try:
+        def _search():
+            resp = requests.get(
+                query_url,
+                proxies=config.proxy,
+                verify=_get_tls_verify(),
+                timeout=(30, 60),
+            )
+            resp.raise_for_status()
+            return resp
+
+        r = call_with_retry(_search, description="pixabay.search_images")
+        response = r.json()
+        items = []
+        for h in response.get("hits", []):
+            url = h.get("largeImageURL") or h.get("webformatURL")
+            if not url:
+                continue
+            item = MaterialInfo()
+            item.provider = "pixabay"
+            item.url = url
+            item.name = (h.get("tags") or search_term).strip()
+            items.append(item)
+        return items
+    except Exception as e:
+        logger.error(f"search images failed: {str(e)}")
+    return []
+
+
+def search_images(
+    search_term: str,
+    source: str = "pexels",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    per_page: int = 20,
+) -> List[MaterialInfo]:
+    """Search photos from the chosen provider, falling back to the other one."""
+    source = (source or "pexels").strip().lower()
+    primary, secondary = (
+        (search_images_pixabay, search_images_pexels)
+        if source == "pixabay"
+        else (search_images_pexels, search_images_pixabay)
+    )
+    items = primary(search_term, video_aspect=video_aspect, per_page=per_page)
+    if items:
+        return items
+    # Fall back to the other provider when the primary has no key / no hits.
+    try:
+        return secondary(search_term, video_aspect=video_aspect, per_page=per_page)
+    except Exception:  # noqa: BLE001 - fallback is best-effort
+        return []
+
+
+def save_image(image_url: str, save_dir: str = "") -> str:
+    """Download an image, validate it with Pillow, and return the local path.
+
+    Mirrors ``save_video``: cached by url-hash so repeat runs are cheap, and a
+    corrupt download is discarded so callers can fall back.
+    """
+    if not save_dir:
+        save_dir = utils.storage_dir("cache_images")
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    url_without_query = image_url.split("?")[0]
+    url_hash = utils.md5(url_without_query)
+    ext = os.path.splitext(url_without_query)[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        ext = ".jpg"
+    image_path = f"{save_dir}/img-{url_hash}{ext}"
+
+    if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+        logger.info(f"image already exists: {image_path}")
+        return image_path
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
+
+    def _download():
+        resp = requests.get(
+            image_url,
+            headers=headers,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+            timeout=(30, 120),
+        )
+        resp.raise_for_status()
+        return resp
+
+    with open(image_path, "wb") as f:
+        f.write(call_with_retry(_download, description="material.download_image").content)
+
+    try:
+        with Image.open(image_path) as im:
+            im.verify()
+        return image_path
+    except Exception as e:  # noqa: BLE001 - discard a corrupt download
+        logger.warning(f"invalid image file: {image_path} => {str(e)}")
+        try:
+            os.remove(image_path)
+        except Exception:
+            pass
+    return ""
+
+
+def _image_too_small(image_path: str, min_dimension) -> bool:
+    """True if the image is below ``min_dimension`` (w, h) -- would look blurry."""
+    if not min_dimension:
+        return False
+    min_w, min_h = min_dimension
+    try:
+        with Image.open(image_path) as im:
+            w, h = im.size
+    except Exception:  # noqa: BLE001 - unreadable handled elsewhere
+        return False
+    return w < min_w or h < min_h
+
+
+def download_images(
+    search_terms: List[str],
+    source: str = "pexels",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+    count: int = 1,
+    save_dir: str = "",
+    min_dimension=None,
+) -> List[str]:
+    """Search + download up to ``count`` photos across ``search_terms``.
+
+    Returns local file paths (deduplicated). Best-effort: returns whatever it
+    could fetch, possibly empty. When ``min_dimension`` (w, h) is given, photos
+    smaller than that are discarded (they would upscale to a blurry full-bleed
+    background) and the next candidate is tried instead.
+    """
+    seen_urls = set()
+    paths: List[str] = []
+    for term in search_terms or []:
+        if len(paths) >= count:
+            break
+        for item in search_images(term, source=source, video_aspect=video_aspect):
+            if len(paths) >= count:
+                break
+            if item.url in seen_urls:
+                continue
+            seen_urls.add(item.url)
+            try:
+                local = save_image(item.url, save_dir=save_dir)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"failed to download image {item.url}: {e}")
+                continue
+            if local and _image_too_small(local, min_dimension):
+                logger.debug(f"skip low-res image for '{term}': {item.url}")
+                try:
+                    os.remove(local)
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            if local:
+                paths.append(local)
+    logger.info(f"downloaded {len(paths)} image(s) for {search_terms}")
+    return paths
 
 
 def save_video(video_url: str, save_dir: str = "") -> str:
