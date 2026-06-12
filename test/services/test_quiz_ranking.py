@@ -228,7 +228,7 @@ class TestRenderDispatch(unittest.TestCase):
         ]}
         with mock.patch.object(hf, "is_available", return_value=True), \
              mock.patch.object(hf.assets, "reset"), \
-             mock.patch.object(hf, "_solely_backgrounds", return_value=[]), \
+             mock.patch.object(hf, "_ranking_backgrounds", return_value=[]), \
              mock.patch.object(hf.utils, "task_dir", return_value=tempfile.gettempdir()), \
              mock.patch.object(hf.render, "render", return_value="ranking.mp4"):
             out, ranges = hf.render_ranking_video(
@@ -236,6 +236,40 @@ class TestRenderDispatch(unittest.TestCase):
             )
         self.assertEqual(out, "ranking.mp4")
         self.assertEqual(ranges, [])
+
+    def test_ranking_backgrounds_align_with_scenes(self):
+        # One photo per scene, item-matched: title gets the generic photo, each
+        # rank card a photo fetched by its item name; a failed fetch falls back.
+        ranking = {"title": "Top 2", "items": [
+            {"rank": 2, "name": "Cheetah", "reason": "x"},
+            {"rank": 1, "name": "Falcon", "reason": "y"},
+        ]}
+
+        def fake_fetch(query, params, source, count=1):
+            return [] if query == "Falcon" else [f"{query}.jpg"]
+
+        with mock.patch.object(hf, "images_enabled", return_value=True), \
+             mock.patch.object(hf, "_solely_backgrounds", return_value=["generic.jpg"]), \
+             mock.patch.object(hf.assets, "fetch_backgrounds", side_effect=fake_fetch):
+            bgs = hf._ranking_backgrounds(self._params(), ranking, None, "pexels")
+        scene_list = hf._ranking_scene_list(ranking, 10.0)
+        self.assertEqual(len(bgs), len(scene_list))
+        self.assertEqual(bgs, ["generic.jpg", "Cheetah.jpg", "generic.jpg"])
+
+    def test_ranking_backgrounds_empty_when_nothing_fetched(self):
+        ranking = {"title": "Top 1", "items": [{"rank": 1, "name": "A"}]}
+        with mock.patch.object(hf, "images_enabled", return_value=True), \
+             mock.patch.object(hf, "_solely_backgrounds", return_value=[]), \
+             mock.patch.object(hf.assets, "fetch_backgrounds", return_value=[]):
+            bgs = hf._ranking_backgrounds(self._params(), ranking, None, "pexels")
+        self.assertEqual(bgs, [])
+
+    def test_ranking_backgrounds_disabled_images(self):
+        with mock.patch.object(hf, "images_enabled", return_value=False):
+            bgs = hf._ranking_backgrounds(
+                self._params(), {"title": "T", "items": []}, None, "pexels"
+            )
+        self.assertEqual(bgs, [])
 
     def test_render_quiz_compose_failure_falls_back(self):
         with mock.patch.object(hf, "is_available", return_value=True), \

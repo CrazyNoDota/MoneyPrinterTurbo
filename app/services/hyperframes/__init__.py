@@ -526,7 +526,7 @@ def render_ranking_video(
     subject = (getattr(params, "video_subject", "") or "").strip()
     title = (ranking or {}).get("title", "")
     assets.reset()
-    backgrounds = _solely_backgrounds(params, video_terms, _image_source(params))
+    backgrounds = _ranking_backgrounds(params, ranking, video_terms, _image_source(params))
     from . import studio
 
     html = studio.compose_ranking(
@@ -573,6 +573,32 @@ def render_chat_video(
         return "", []
     out = render.render(html, os.path.join(utils.task_dir(task_id), "chat.mp4"))
     return (out, []) if out else ("", [])
+
+
+def _ranking_backgrounds(params, ranking, video_terms, source):
+    """One photo per ranking scene, item-matched.
+
+    The title card gets a subject/terms photo and each rank card a photo of the
+    item itself (a falcon card should not sit on a cheetah photo). The list is
+    aligned 1:1 with ``_ranking_scene_list``'s scene order (same skip rules), so
+    the composer's ``bgs[i % len(bgs)]`` mapping becomes the identity; a failed
+    fetch falls back to the generic photo (or ``None`` -> gradient base).
+    """
+    if not images_enabled():
+        return []
+    generic = _solely_backgrounds(params, video_terms, source, cap=1)
+    fallback = generic[0] if generic else None
+    bgs = []
+    title = (ranking or {}).get("title", "").strip()
+    if title:
+        bgs.append(fallback)
+    for item in (ranking or {}).get("items", []):
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        fetched = assets.fetch_backgrounds(name, params, source, count=1)
+        bgs.append(fetched[0] if fetched else fallback)
+    return bgs if any(bgs) else []
 
 
 def _solely_backgrounds(params, video_terms, source, cap=5):

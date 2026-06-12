@@ -839,10 +839,15 @@ def _quiz_scene_tweens(spec_scene: Scene, role: str, idx: int, background) -> st
             f'{{scale:1,duration:0.45,ease:"back.out(1.6)"}},{round(start + 0.34, 3)});'
         )
     else:
-        js.append(
-            f'tl.fromTo("#qscene-{idx} .line",{{autoAlpha:0,y:48}},'
-            f'{{autoAlpha:1,y:0,duration:0.55,stagger:0.1,ease:"power3.out"}},{round(start + 0.08, 3)});'
-        )
+        # The opening question is the hook — fully readable at frame 0, no
+        # entrance animation; later questions keep the rise-in.
+        if start <= 0.001:
+            js.append(f'tl.set("#qscene-{idx} .line",{{autoAlpha:1,y:0}},0);')
+        else:
+            js.append(
+                f'tl.fromTo("#qscene-{idx} .line",{{autoAlpha:0,y:48}},'
+                f'{{autoAlpha:1,y:0,duration:0.55,stagger:0.1,ease:"power3.out"}},{round(start + 0.08, 3)});'
+            )
     js.append(
         f'tl.to("#qscene-{idx}",{{autoAlpha:0,y:-28,duration:0.4,ease:"power2.in"}},{exit_at});'
     )
@@ -987,10 +992,15 @@ def _rank_scene_tweens(s: Scene, idx: int, background) -> str:
             f'{{scale:1.08,duration:{dur},ease:"none"}},{start});'
         )
     if parsed is None:
-        js.append(
-            f'tl.fromTo("#rscene-{idx} .line",{{autoAlpha:0,scale:0.7}},'
-            f'{{autoAlpha:1,scale:1,duration:0.6,ease:"back.out(1.7)"}},{round(start + 0.08, 3)});'
-        )
+        # The title card is the hook — fully readable at frame 0; a mid-video
+        # title (shouldn't normally happen) keeps the pop-in.
+        if start <= 0.001:
+            js.append(f'tl.set("#rscene-{idx} .line",{{autoAlpha:1,scale:1}},0);')
+        else:
+            js.append(
+                f'tl.fromTo("#rscene-{idx} .line",{{autoAlpha:0,scale:0.7}},'
+                f'{{autoAlpha:1,scale:1,duration:0.6,ease:"back.out(1.7)"}},{round(start + 0.08, 3)});'
+            )
     else:
         rank = parsed[0]
         # #1 gets a heavier, later slam (suspense beat before it lands).
@@ -1211,9 +1221,13 @@ def compose_chat(scenes: List[Scene], subject: str, width: int, height: int,
             f'<div class="clip" data-start="0" data-duration="{total_r}" '
             f'data-track-index="4">{header}</div>',
         ]
-        # Persistent typing-dot bounce loop (visual only; clamped within the timeline).
+        # Persistent typing-dot bounce loop (visual only). repeat:-1 is banned:
+        # an infinite child makes the GSAP timeline's duration Infinity, which
+        # breaks the renderer's frame seek (every tween then freezes at t=0).
+        # Repeat a finite count that covers the whole video instead.
+        cycles = max(1, int(total_r / 0.6) + 1)
         bounce = (
-            'tl.to(".dot",{y:-10,duration:0.3,repeat:-1,yoyo:true,'
+            f'tl.to(".dot",{{y:-10,duration:0.3,repeat:{cycles},yoyo:true,'
             'stagger:0.12,ease:"sine.inOut"},0);'
         )
         tweens.insert(0, bounce)

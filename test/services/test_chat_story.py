@@ -206,6 +206,17 @@ class TestComposeChat(unittest.TestCase):
         self.assertIn("#msg-0", html)             # per-message tween targets
         self.assertIn("#msg-1", html)
 
+    def test_no_infinite_repeat(self):
+        # repeat:-1 makes the GSAP timeline's duration Infinity, which breaks
+        # the renderer's frame seek: every tween freezes at t=0 and the video
+        # comes out as an empty phone frame. The bounce must repeat finitely.
+        html = studio.compose_chat(
+            self._scenes(), "s", 1080, 1920, 10.0, persons=["Anna", "Ben"]
+        )
+        self.assertNotIn("repeat:-1", html)
+        self.assertNotIn("repeat: -1", html)
+        self.assertIn("repeat:", html)            # the bounce loop is still there
+
     def test_empty_returns_empty(self):
         self.assertEqual(studio.compose_chat([], "x", 1080, 1920, 0.0), "")
 
