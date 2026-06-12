@@ -276,6 +276,20 @@ voice_en_fallback = "en-US-AndrewNeural-Male"
 #                 lower-third over a motion background, with an optional talking-head
 #                 presenter in a corner (see the Talking head block above). Captions
 #                 are burned only when no presenter could be produced.
+## quiz/ranking ## ----------------------------------------------------------
+#   "quiz"        trivia format: the LLM writes N questions as strict JSON; per question
+#                 the video shows a question card, an animated 3-2-1 countdown beat (the
+#                 narration speaks "three... two... one..." so the beat is audio-synced),
+#                 then an answer-reveal card with a one-line fun fact.
+#   "ranking"     "Top N" countdown: the LLM writes a ranked Top-N list as strict JSON;
+#                 the video counts down #N -> #1 with slamming rank badges and a suspense
+#                 beat before #1.
+#   "chat"        messenger story: the LLM writes a two-person SMS dialogue as strict JSON
+#                 (hook -> escalation -> twist); rendered as a phone chat where bubbles pop
+#                 in one at a time, synced to a single-voice narration of the exchange.
+# Both build their own narration from structured LLM JSON; any LLM/JSON failure degrades
+# non-fatally to the regular subject-driven script + normal visual track.
+## end quiz/ranking ## ------------------------------------------------------
 # Leave empty to fall back to hyperframes_enabled below.
 video_visual_mode = ""
 hyperframes_enabled = false   # solely-hyperframes mode (equivalent to video_visual_mode="hyperframes")
@@ -288,6 +302,10 @@ hyperframes_enabled = false   # solely-hyperframes mode (equivalent to video_vis
 #                 less predictable). Studio falls back to this automatically if it ever
 #                 fails to produce a valid composition.
 hyperframes_engine = "studio"
+# Maximum scene duration (seconds) for motion-graphics modes. Long scenes are
+# split at word/phrase boundaries so the visual changes more often (retention).
+# Set <= 0 to disable splitting. Only affects hyperframes-rendered scenes.
+scene_max_seconds = 4.0
 hyperframes_dir = ".hyperframes"   # project dir created by setup-hyperframes.bat
 hyperframes_version = "0.6.58"     # pinned CLI version for reproducible renders
 hyperframes_node = ""         # optional dir containing node/npx; else found on PATH
@@ -517,11 +535,15 @@ hide_log = false
 # custom_position = 70.0
 
 # 字幕样式 (Caption style):
-#   "outline" -> 干净的描边文字，无背景框（默认，类似短视频字幕）
-#                clean outlined text, no box (default; modern shorts look)
+#   "karaoke" -> CapCut/TikTok 逐词高亮字幕（默认）
+#                word-by-word highlight, current word colored + scaled (default)
+#   "tiktok"  -> 全大写 + 粗描边 + 投影 (ALL-CAPS, heavy outline + drop shadow)
+#   "outline" -> 干净的描边文字，无背景框 (clean outlined text, no box)
 #   "shadow"  -> 描边 + 投影 (outline + soft drop shadow)
 #   "box"     -> 传统纯色背景框 (legacy solid background box)
-# subtitle_style = "outline"
+# subtitle_style = "karaoke"
+# 卡拉OK样式当前朗读单词的高亮颜色 (highlight color for the spoken word in karaoke)
+# subtitle_highlight_color = "#FFE600"
 
 ########## Upload-Post (Cross-post to TikTok/Instagram)
 # Upload-Post allows you to automatically cross-post generated videos to TikTok and Instagram.
@@ -542,3 +564,17 @@ upload_post_platforms = ["tiktok", "instagram"]
 
 # Automatically cross-post videos after generation (if false, you'll need to call the API manually)
 upload_post_auto_upload = false
+
+########## Audio polish (SFX + ducking)
+# Sound effects played at scene-cut points (whoosh, pop, etc.).
+# Regenerate assets: python tools/make_sfx.py
+sfx_enabled = true
+# Master volume multiplier for all SFX clips (0.0 = mute, 1.0 = full).
+sfx_volume = 0.6
+
+# BGM ducking: lower background music volume while the narrator is speaking so
+# the voice stays intelligible; the music swells back up in narration gaps.
+bgm_ducking_enabled = true
+# BGM volume while voice is active (0.0 – 1.0). bgm_volume (set elsewhere)
+# applies in silent gaps and at the end.
+bgm_duck_volume = 0.15

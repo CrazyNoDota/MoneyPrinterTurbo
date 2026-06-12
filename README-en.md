@@ -46,6 +46,53 @@ materials, video subtitles, and video background music before synthesizing a hig
 - [x] Video material sources are **high-definition** and **royalty-free**, and you can also use your own **local materials**
 - [x] Supports integration with various models such as **OpenAI**, **Moonshot**, **Azure**, **gpt4free**, **one-api**, **Qwen**, **Google Gemini**, **Ollama**, **DeepSeek**, **MiniMax**, **ERNIE**, **Pollinations**, **ModelScope** and more
 
+## Viral Video Enhancements 🚀
+
+### New Video Modes (`video_visual_mode`)
+
+Set in the `[app]` section of `config.toml` (or the `video_visual_mode` API parameter):
+
+| Mode | Description |
+|------|-------------|
+| `quiz` | Trivia format: question card → 3-2-1 countdown → answer reveal, driven by LLM-generated JSON |
+| `ranking` | Top-N countdown from #N down to #1 with rank badges and a suspense beat before #1 |
+| `chat` | Messenger story: two-person SMS dialogue with bubbles popping in one at a time, synced to narration |
+| `news` | News layout: persistent headline plate + lower-third captions, optional talking-head presenter |
+| `hyperframes` | Full motion-graphics video with no stock footage |
+
+Any LLM/JSON failure is non-fatal — the pipeline degrades gracefully to the regular subject-driven video.
+
+```toml
+[app]
+video_visual_mode = "quiz"   # quiz | ranking | chat | news | hyperframes | footage
+```
+
+### Karaoke Captions
+
+Word-by-word highlight captions (enabled by default). Customize in the `[ui]` section:
+
+```toml
+[ui]
+subtitle_style = "karaoke"           # karaoke | tiktok | outline | shadow | box
+subtitle_highlight_color = "#FFE600" # highlight color for the currently-spoken word
+```
+
+Falls back to regular phrase captions when word timings are unavailable.
+
+### Audio Polish
+
+Background music is automatically ducked under the narrator's voice; transition SFX play at scene cuts:
+
+```toml
+[app]
+bgm_ducking_enabled = true   # duck BGM volume while narrator is speaking
+bgm_duck_volume = 0.15       # BGM volume while voice is active (0.0–1.0)
+sfx_enabled = true           # play transition sound effects at scene cuts
+sfx_volume = 0.6             # SFX volume multiplier
+```
+
+To regenerate the SFX assets: `python tools/make_sfx.py`
+
 ## Video Demos 📺
 
 ### Portrait 9:16
